@@ -1,0 +1,21 @@
+{{- if and .Values.service.enabled (not (eq .Values.type "kservice")) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "fullname" . }}
+  labels:
+    {{- include "labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: http
+    - port: {{ .Values.service.securePort }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: https   
+  selector:
+    {{- include "selectorLabels" . | nindent 4 }}
+{{- end }}

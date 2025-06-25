@@ -1,0 +1,123 @@
+{{- if eq .Values.type "deployment" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fullname" . }}
+  labels:
+    {{- include "labels" . | nindent 4 }}
+spec:
+{{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+{{- end }}
+  selector:
+    matchLabels:
+      {{- include "selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+    {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+      labels:
+        {{- include "selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ template "serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }} 
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+          - "--config-path"
+          - "/chains/revolution/configs/general.yaml"
+          - "--contracts-config-path"
+          - "/chains/revolution/configs/contracts.yaml"
+          - "--genesis-path"
+          - "/chains/revolution/configs/genesis.yaml"
+          - "--wallets-path"
+          - "/chains/revolution/configs/wallets.yaml"
+          - "--secrets-path"
+          - "/chains/revolution/configs/secrets.yaml"
+          - "--components"
+          - "api,tree,eth,state_keeper,housekeeper,commitment_generator,da_dispatcher,vm_runner_protective_reads,vm_runner_bwip"
+          envFrom:
+            - configMapRef:
+                name: settings
+            # - secretRef:
+            #     name: {{ template "name" .}}
+          ports: 
+            - name: http-api
+              containerPort: 3050
+              protocol: TCP
+            - name: http-data
+              containerPort: 3320
+              protocol: TCP
+          volumeMounts:
+            - name: zkstack-config
+              subPath: ecosystem.yaml
+              mountPath: /ZkStack.yaml
+            - name: ecosystem-config
+              mountPath: /configs
+            - name: revolution-secrets
+              subPath: secrets.yaml
+              mountPath: /chains/revolution/configs/secrets.yaml
+            - name: revolution-secrets
+              subPath: wallets.yaml
+              mountPath: /chains/revolution/configs/wallets.yaml
+            - name: chain-config
+              subPath: general.yaml
+              mountPath: /chains/revolution/configs/general.yaml
+            - name: chain-config
+              subPath: genesis.yaml
+              mountPath: /chains/revolution/configs/genesis.yaml
+            - name: chain-config
+              subPath: contracts.yaml
+              mountPath: /chains/revolution/configs/contracts.yaml
+            - name: zkstack-config
+              subPath: ZkStack.yaml
+              mountPath: /chains/revolution/ZkStack.yaml
+            - name: revolution-secrets
+              subPath: gcserviceaccount.json
+              mountPath: /root/.config/gcloud/application_default_credentials.json
+            - name: zk-pvc
+              subPath: artifacts/revolution/artifacts
+              mountPath: /chains/revolution/artifacts
+            - name: zk-pvc
+              subPath: rocksdb/revolution/db
+              mountPath: /chains/revolution/db
+{{- if hasKey .Values "livenessProbe" }}
+          livenessProbe:
+{{ toYaml .Values.livenessProbe | trim | indent 12 }}
+{{- end }}
+{{- if hasKey .Values "readinessProbe" }}
+          readinessProbe:
+{{ toYaml .Values.readinessProbe | trim | indent 12 }}
+{{- end }}
+{{- if hasKey .Values "resources" }}
+          resources:
+{{ toYaml .Values.resources | nindent 12 }}
+{{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.volumes }}
+      volumes:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

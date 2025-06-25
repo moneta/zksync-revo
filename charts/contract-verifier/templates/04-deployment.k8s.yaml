@@ -1,0 +1,110 @@
+{{- if eq .Values.type "deployment" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "fullname" . }}
+  labels:
+    {{- include "labels" . | nindent 4 }}
+spec:
+{{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+{{- end }}
+  selector:
+    matchLabels:
+      {{- include "selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+    {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+      labels:
+        {{- include "selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ template "serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }} 
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+          - "--config-path"
+          - "/revo/chains/configs/general.yaml"
+          - "--secrets-path"
+          - "/revo/chains/configs/secrets.yaml"
+          env:
+            - name: CONTRACT_VERIFIER_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: contract-verifier-config
+                  key: CONTRACT_VERIFIER_PORT
+            - name: CONTRACT_VERIFIER_COMPILATION_TIMEOUT
+              valueFrom:
+                configMapKeyRef:
+                  name: contract-verifier-config
+                  key: CONTRACT_VERIFIER_COMPILATION_TIMEOUT
+            - name: CONTRACT_VERIFIER_PROMETHEUS_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: contract-verifier-config
+                  key: CONTRACT_VERIFIER_PROMETHEUS_PORT
+            - name: CONTRACT_VERIFIER_ETHERSCAN_API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: contract-verifier-config
+                  key: CONTRACT_VERIFIER_ETHERSCAN_API_URL
+            - name: CONTRACT_VERIFIER_ETHERSCAN_API_KEY
+              valueFrom:
+                configMapKeyRef:
+                  name: contract-verifier-config
+                  key: CONTRACT_VERIFIER_ETHERSCAN_API_KEY
+          envFrom:
+            - configMapRef:
+                name: settings
+          ports: 
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          volumeMounts:
+            - name: revolution-secrets
+              subPath: secrets.yaml
+              mountPath: /revo/chains/configs/secrets.yaml
+            - name: chain-config
+              subPath: general.yaml
+              mountPath: /revo/chains/configs/general.yaml
+{{- if hasKey .Values "livenessProbe" }}
+          livenessProbe:
+{{ toYaml .Values.livenessProbe | trim | indent 12 }}
+{{- end }}
+{{- if hasKey .Values "readinessProbe" }}
+          readinessProbe:
+{{ toYaml .Values.readinessProbe | trim | indent 12 }}
+{{- end }}
+{{- if hasKey .Values "resources" }}
+          resources:
+{{ toYaml .Values.resources | nindent 12 }}
+{{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.volumes }}
+      volumes:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

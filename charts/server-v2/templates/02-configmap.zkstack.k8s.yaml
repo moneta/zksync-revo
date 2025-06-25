@@ -1,0 +1,35 @@
+## 310-geth-configmap.yml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: zkstack-config
+  labels:
+    app: zkstack-config
+data:
+  ecosystem.yaml: |-
+    name: dev_revo
+    l1_network: Sepolia
+    link_to_code: ./zksync-revo
+    bellman_cuda_dir: null
+    chains: /chains
+    config: /configs/
+    default_chain: revolution
+    era_chain_id: 270
+    prover_version: Gpu
+    wallet_creation: InFile
+  ZkStack.yaml: |-
+    id: 1
+    name: revolution
+    chain_id: 73861
+    prover_version: Gpu
+    configs: /chains/revolution/configs/
+    rocks_db_path: /chains/revolution/db/
+    external_node_config_path: null
+    artifacts_path: /chains/revolution/artifacts/
+    l1_batch_commit_data_generator_mode: Rollup
+    base_token:
+      address: 0x2c81f8b274d6096bbd99a6e133e2dec3731af114
+      nominator: 1
+      denominator: 10
+    wallet_creation: InFile
+    evm_emulator: false

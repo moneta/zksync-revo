@@ -1,0 +1,150 @@
+# Default values for service.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+global:
+  environmentName: default
+
+type: deployment
+
+# CronJob specific config options
+cronjob:
+  # Once per hour
+  schedule: '1/15 * * * *'
+
+pingsource:
+  enabled: false
+  schedule: '*/15 * * * *'
+
+nameOverride: ''
+fullnameOverride: ''
+
+image:
+  repository: ndau/prover-fri-gateway
+  pullPolicy: Always
+  tag: alpha-0.1
+  # pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: ndau-repo-dockerhub
+  # - name: ndau-repo-dockerhub
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ''
+
+podAnnotations: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+service:
+  enabled: true
+  type: ClusterIP
+  port: 80
+  securePort: 443
+  targetPort: 
+
+ingress:
+  enabled: false
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/limit-rpm: "600"
+    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "7200"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "7200"
+    nginx.ingress.kubernetes.io/enable-cors: "false"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    #nginx.ingress.kubernetes.io/configuration-snippet: |
+    #  more_set_headers "Content-Security-Policy: default-src 'none'; script-src 'self' 'unsafe-inline'; connect-src * wss://relay.walletconnect.com/* wss://relay.walletconnect.org/*; frame-ancestors *;";
+
+  hosts:
+    - host: gw.dev.revolutionchain.io
+      paths: ["/"]
+  tls:
+    - secretName: prover-fri-gateway-dev-tls
+      hosts:
+        - gw.dev.revolutionchain.io
+
+resources:
+  limits:
+    cpu: 300m
+    memory: 2048Mi
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  # We usually recommend not to specify default resources and to leave this as a conscious
+  # choice for the user. This also increases chances charts run on environments with little
+  # resources, such as Minikube. If you do want to specify resources, uncomment the following
+  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+  # limits:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+replicaCount: 1
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 100
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+env: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+metadata:
+  deployment: {}
+  cronjob: {}
+  service: {}
+  ingress:
+    annotations:
+      kubernetes.io/ingress.class: nginx
+      nginx.ingress.kubernetes.io/limit-rpm: "600"
+      nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+      nginx.ingress.kubernetes.io/configuration-snippet: |
+        more_set_headers "Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src 'self'; img-src 'self'; style-src 'self';";
+        more_set_headers "Referrer-Policy: strict-origin-when-cross-origin";
+        more_set_headers "Feature-Policy: camera 'none'; microphone 'none'; geolocation 'none'; encrypted-media 'none'; payment 'none'; speaker 'none'; usb 'none';";
+
+
+volumes:
+  - name: revolution-secrets
+    secret:
+      secretName: revolution
+  - name: chain-config
+    configMap:
+      name: chain-config
+  # - name: ecosystem-config
+  #   configMap:
+  #     name: ecosystem-config
+  # - name: zkstack-config
+  #   configMap:
+  #     name: zkstack-config
+  # - name: zk-pvc
+  #   persistentVolumeClaim:
+  #     claimName: zk-cephfs-pvc

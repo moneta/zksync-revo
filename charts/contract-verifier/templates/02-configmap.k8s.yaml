@@ -1,0 +1,13 @@
+## 310-geth-configmap.yml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: contract-verifier-config
+  labels:
+    app: contract-verifier-config
+data:
+  CONTRACT_VERIFIER_PORT: "3070"
+  CONTRACT_VERIFIER_COMPILATION_TIMEOUT: "30"
+  CONTRACT_VERIFIER_PROMETHEUS_PORT: "3314"
+  CONTRACT_VERIFIER_ETHERSCAN_API_URL: https://sepolia.etherscan.io/
+  CONTRACT_VERIFIER_ETHERSCAN_API_KEY: "1234"
