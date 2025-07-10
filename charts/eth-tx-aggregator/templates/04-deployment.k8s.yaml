@@ -46,19 +46,19 @@ spec:
           - "--secrets-path"
           - "/chains/revolution/configs/secrets.yaml"
           - "--components"
-          - "api,tree,state_keeper,housekeeper,commitment_generator,da_dispatcher,vm_runner_protective_reads,vm_runner_bwip"
+          - "eth_tx_aggregator"
           envFrom:
             - configMapRef:
                 name: settings
             # - secretRef:
             #     name: {{ template "name" .}}
-          ports: 
-            - name: http-api
-              containerPort: 3050
-              protocol: TCP
-            - name: http-data
-              containerPort: 3320
-              protocol: TCP
+          # ports: 
+            # - name: http-api
+            #   containerPort: 3050
+            #   protocol: TCP
+            # - name: http-data
+            #   containerPort: 3320
+            #   protocol: TCP
           volumeMounts:
             - name: zkstack-config
               subPath: ecosystem.yaml
@@ -86,9 +86,9 @@ spec:
             - name: revolution-secrets
               subPath: gcserviceaccount.json
               mountPath: /root/.config/gcloud/application_default_credentials.json
-            - name: zk-pvc
-              subPath: artifacts/revolution/artifacts
-              mountPath: /chains/revolution/artifacts
+            # - name: zk-pvc
+            #   subPath: artifacts/revolution/artifacts
+            #   mountPath: /chains/revolution/artifacts
             - name: zk-pvc
               subPath: rocksdb/revolution/db
               mountPath: /chains/revolution/db

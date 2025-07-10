@@ -101,8 +101,8 @@ data:
     eth:
       sender:
         wait_confirmations: 1
-        tx_poll_period: 1
-        aggregate_tx_poll_period: 1
+        tx_poll_period: 3
+        aggregate_tx_poll_period: 3
         max_txs_in_flight: 190
         proof_sending_mode: ONLY_REAL_PROOFS
         max_aggregated_blocks_to_commit: 1
@@ -130,7 +130,7 @@ data:
         time_in_mempool_multiplier_cap: 10
       watcher:
         confirmations_for_eth_event: 0
-        eth_node_poll_interval: 300
+        eth_node_poll_interval: 3000 ms
     snapshot_creator:
       object_store:
         # mode: FileBacked
@@ -286,7 +286,7 @@ data:
           weight: 1
         leader: validator:public:bls12_381:ae139a7be930d137f67a20528f16031a82019a5663ff3777285e0471943341b59e446709a23f588dc078bda351ed5293040546e1940a08724500036ec9ec9d879d6cdfbd980aabbdb9a2b576734cc5bf496ff1b8b75f30ca4bbe921c55da60a3
     gateway_migrator:
-      eth_node_poll_interval: 300 ms
+      eth_node_poll_interval: 3000 ms
     tee_prover_gateway:
       api_url: http://127.0.0.1:4320
 
