@@ -586,39 +586,62 @@ impl EthTxAggregator {
             stm_protocol_version_id,
             stm_validator_timelock_address,
             da_validator_pair,
-        } = self.get_multicall_data().await.map_err(|err| {
-            tracing::error!("Failed to get multicall data {err:?}");
+        } = retry_rpc_call(
+            || async { self.get_multicall_data().await },
+            5,
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!("Failed to get multicall data after retries: {err:?}");
             err
         })?;
 
-        let snark_wrapper_vk_hash = self
-            .get_snark_wrapper_vk_hash(verifier_address)
-            .await
-            .map_err(|err| {
-                tracing::error!("Failed to get VK hash from the Verifier {err:?}");
-                err
-            })?;
-        let fflonk_snark_wrapper_vk_hash = self
-            .get_fflonk_snark_wrapper_vk_hash(verifier_address)
-            .await
-            .map_err(|err| {
-                tracing::error!("Failed to get FFLONK VK hash from the Verifier {err:?}");
-                err
-            })?;
+        let snark_wrapper_vk_hash = retry_rpc_call(
+            || {
+                let verifier_address = verifier_address.clone();
+                async move { self.get_snark_wrapper_vk_hash(verifier_address).await }
+            },
+            5,
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!("Failed to get VK hash from the Verifier after retries: {err:?}");
+            err
+        })?;
+
+        let fflonk_snark_wrapper_vk_hash = retry_rpc_call(
+            || {
+                let verifier_address = verifier_address.clone();
+                async move { self.get_fflonk_snark_wrapper_vk_hash(verifier_address).await }
+            },
+            5,
+        )
+        .await
+        .map_err(|err| {
+            tracing::error!("Failed to get FFLONK VK hash from the Verifier after retries: {err:?}");
+            err
+        })?;
 
         let l1_verifier_config = L1VerifierConfig {
             snark_wrapper_vk_hash,
             fflonk_snark_wrapper_vk_hash,
         };
 
-        let priority_tree_start_index =
-            if let Some(priority_tree_start_index) = self.priority_tree_start_index {
-                Some(priority_tree_start_index)
-            } else {
-                self.priority_tree_start_index =
-                    get_priority_tree_start_index(self.eth_client.as_ref()).await?;
-                self.priority_tree_start_index
-            };
+        let priority_tree_start_index = if let Some(index) = self.priority_tree_start_index {
+            Some(index)
+        } else {
+            let start_index = retry_rpc_call(
+                || {
+                    let client = self.eth_client.clone();
+                    async move { get_priority_tree_start_index(client.as_ref()).await }
+                },
+                5,
+            )
+            .await?;
+            self.priority_tree_start_index = Some(start_index);
+            Some(start_index)
+        };
+
         let commit_restriction = self
             .config
             .tx_aggregation_only_prove_and_execute

@@ -23,6 +23,7 @@ use crate::event_processors::{
     BatchRootProcessor, DecentralizedUpgradesEventProcessor, EventsSource,
     GatewayMigrationProcessor,
 };
+use zksync_utils::retry::retry_rpc_call;
 
 mod client;
 mod event_processors;
@@ -208,18 +209,34 @@ impl EthWatch {
 
             // There are no new blocks so there is nothing to be done
             if from_block > to_block {
+                tokio::time::sleep(Duration::from_millis(rand::thread_rng().gen_range(250..750))).await;
                 continue;
             }
 
-            let processor_events = client
-                .get_events(
-                    Web3BlockNumber::Number(from_block.into()),
-                    Web3BlockNumber::Number(to_block.into()),
-                    processor.topic1(),
-                    processor.topic2(),
-                    RETRY_LIMIT,
-                )
-                .await?;
+            let processor_events = retry_rpc_call(
+                || {
+                    let client = client.clone();
+                    async move {
+                        client
+                            .get_events(
+                                Web3BlockNumber::Number(from_block.into()),
+                                Web3BlockNumber::Number(to_block.into()),
+                                processor.topic1(),
+                                processor.topic2(),
+                                RETRY_LIMIT,
+                            )
+                            .await
+                    }
+                },
+                5,
+            )
+            .await
+            .map_err(|e| {
+                tracing::warn!("get_events failed after retries: {:?}", e);
+                EventProcessorError::Other(anyhow::anyhow!("RPC call failed after retries"))
+            })?;
+
+
             let processed_events_count = processor
                 .process_events(storage, processor_events.clone())
                 .await?;
@@ -247,6 +264,9 @@ impl EthWatch {
                 .await
                 .map_err(DalError::generalize)?;
         }
+
+        // Add loop delay to reduce hammering even if some work was done
+        tokio::time::sleep(Duration::from_millis(rand::thread_rng().gen_range(500..1500))).await;
 
         Ok(())
     }

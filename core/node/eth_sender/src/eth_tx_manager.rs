@@ -28,6 +28,7 @@ use crate::{
     health::{EthTxDetails, EthTxManagerHealthDetails},
     metrics::TransactionType,
 };
+use zksync_utils::retry::retry_rpc_call;
 
 /// The component is responsible for managing sending eth_txs attempts.
 ///
@@ -795,11 +796,23 @@ impl EthTxManager {
         // aggregator makes sure that corresponding Commit transaction is confirmed before creating
         // a PublishProof transaction
         for operator_type in self.l1_interface.supported_operator_types() {
-            let l1_block_numbers = self
-                .l1_interface
-                .get_l1_block_numbers(operator_type)
-                .await
-                .unwrap();
+            // PATCH: Add retry wrapper to protect L1 RPC
+            let l1_block_numbers = match retry_rpc_call(
+                || {
+                    let operator_type = operator_type.clone();
+                    async move { self.l1_interface.get_l1_block_numbers(operator_type).await }
+                },
+                5,
+            )
+            .await
+            {
+                Ok(res) => res,
+                Err(err) => {
+                    tracing::warn!("Failed to fetch L1 block numbers after retries: {:?}", err);
+                    continue; // skip this operator_type on failure
+                }
+            };
+
             tracing::debug!(
                 "Loop iteration at block {} for {operator_type:?} operator",
                 l1_block_numbers.latest
