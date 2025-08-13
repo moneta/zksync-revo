@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap};
 
 use tokio::sync::watch;
 use zksync_config::configs::eth_sender::SenderConfig;
@@ -38,6 +38,7 @@ use crate::{
     zksync_functions::ZkSyncFunctions,
     Aggregator, EthSenderError,
 };
+use zksync_utils::retry::retry_with_backoff;
 
 #[derive(Debug)]
 pub struct DAValidatorPair {
@@ -586,60 +587,35 @@ impl EthTxAggregator {
             stm_protocol_version_id,
             stm_validator_timelock_address,
             da_validator_pair,
-        } = retry_rpc_call(
-            || async { self.get_multicall_data().await },
-            5,
-        )
-        .await
-        .map_err(|err| {
-            tracing::error!("Failed to get multicall data after retries: {err:?}");
-            err
-        })?;
+        } = retry_with_backoff(self, |s| {
+            Box::pin(async move { s.get_multicall_data().await })
+        }, 5).await?;
 
-        let snark_wrapper_vk_hash = retry_rpc_call(
-            || {
-                let verifier_address = verifier_address.clone();
-                async move { self.get_snark_wrapper_vk_hash(verifier_address).await }
-            },
-            5,
-        )
-        .await
-        .map_err(|err| {
-            tracing::error!("Failed to get VK hash from the Verifier after retries: {err:?}");
-            err
-        })?;
+        let snark_wrapper_vk_hash = retry_with_backoff(self, |s| {
+            let v = verifier_address;
+            Box::pin(async move { s.get_snark_wrapper_vk_hash(v).await })
+        }, 5).await?;
 
-        let fflonk_snark_wrapper_vk_hash = retry_rpc_call(
-            || {
-                let verifier_address = verifier_address.clone();
-                async move { self.get_fflonk_snark_wrapper_vk_hash(verifier_address).await }
-            },
-            5,
-        )
-        .await
-        .map_err(|err| {
-            tracing::error!("Failed to get FFLONK VK hash from the Verifier after retries: {err:?}");
-            err
-        })?;
+        let fflonk_snark_wrapper_vk_hash = retry_with_backoff(self, |s| {
+            let v = verifier_address;
+            Box::pin(async move { s.get_fflonk_snark_wrapper_vk_hash(v).await })
+        }, 5).await?;
 
         let l1_verifier_config = L1VerifierConfig {
             snark_wrapper_vk_hash,
             fflonk_snark_wrapper_vk_hash,
         };
 
-        let priority_tree_start_index = if let Some(index) = self.priority_tree_start_index {
-            Some(index)
+        let priority_tree_start_index = if let Some(ix) = self.priority_tree_start_index {
+            Some(ix)
         } else {
-            let start_index = retry_rpc_call(
-                || {
-                    let client = self.eth_client.clone();
-                    async move { get_priority_tree_start_index(client.as_ref()).await }
-                },
-                5,
-            )
-            .await?;
-            self.priority_tree_start_index = Some(start_index);
-            Some(start_index)
+            let start_index_opt = retry_with_backoff(self, |s| {
+                Box::pin(async move {
+                    get_priority_tree_start_index(s.eth_client.as_ref()).await
+                })
+            }, 5).await?;
+            self.priority_tree_start_index = start_index_opt;
+            self.priority_tree_start_index
         };
 
         let commit_restriction = self

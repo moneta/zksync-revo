@@ -16,7 +16,7 @@ use crate::{
     COMPLEX_UPGRADER_ADDRESS, CONTRACT_DEPLOYER_ADDRESS, ECRECOVER_PRECOMPILE_ADDRESS,
     EC_ADD_PRECOMPILE_ADDRESS, EC_MUL_PRECOMPILE_ADDRESS, EC_PAIRING_PRECOMPILE_ADDRESS,
     IMMUTABLE_SIMULATOR_STORAGE_ADDRESS, KECCAK256_PRECOMPILE_ADDRESS, KNOWN_CODES_STORAGE_ADDRESS,
-    L1_MESSENGER_ADDRESS, L2_BASE_TOKEN_ADDRESS, MSG_VALUE_SIMULATOR_ADDRESS, NONCE_HOLDER_ADDRESS,
+    L1_MESSENGER_ADDRESS, L2_BASE_TOKEN_ADDRESS, NODE_CONTRACT_ADDRESS, MSG_VALUE_SIMULATOR_ADDRESS, NONCE_HOLDER_ADDRESS,
     SHA256_PRECOMPILE_ADDRESS, SYSTEM_CONTEXT_ADDRESS,
 };
 
@@ -75,6 +75,30 @@ static SYSTEM_CONTRACT_LIST: [(&str, &str, Address, ContractLanguage); 37] = [
         "",
         "L2BaseToken",
         L2_BASE_TOKEN_ADDRESS,
+        ContractLanguage::Sol,
+    ),
+    (
+        "",
+        "NodeContract",
+        NODE_CONTRACT_ADDRESS,
+        ContractLanguage::Sol,
+    ),
+    (
+        "",
+        "L2BaseToken",
+        L2_BASE_TOKEN_ADDRESS,
+        ContractLanguage::Sol,
+    ),
+    (
+        "",
+        "CreatorPool",
+        CREATOR_POOL_ADDRESS,
+        ContractLanguage::Sol,
+    ),
+    (
+        "",
+        "CreatorPoolFactory",
+        POOL_FACTORY_ADDRESS,
         ContractLanguage::Sol,
     ),
     (

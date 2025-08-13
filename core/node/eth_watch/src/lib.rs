@@ -2,7 +2,7 @@
 //! protocol upgrades etc.
 //! New events are accepted to the ZKsync network once they have the sufficient amount of L1 confirmations.
 
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration, cmp::min};
 
 use anyhow::Context as _;
 use tokio::sync::watch;
@@ -23,7 +23,10 @@ use crate::event_processors::{
     BatchRootProcessor, DecentralizedUpgradesEventProcessor, EventsSource,
     GatewayMigrationProcessor,
 };
-use zksync_utils::retry::retry_rpc_call;
+use zksync_utils::retry::retry_with_backoff_no_state;
+use rand::Rng;
+
+const MAX_LOG_RANGE_BLOCKS: u64 = 1_000;
 
 mod client;
 mod event_processors;
@@ -197,7 +200,7 @@ impl EthWatch {
                 client.confirmed_block_number().await?
             };
 
-            let from_block = storage
+            let mut cursor = storage
                 .eth_watcher_dal()
                 .get_or_set_next_block_to_process(
                     processor.event_type(),
@@ -207,67 +210,88 @@ impl EthWatch {
                 .await
                 .map_err(DalError::generalize)?;
 
-            // There are no new blocks so there is nothing to be done
-            if from_block > to_block {
-                tokio::time::sleep(Duration::from_millis(rand::thread_rng().gen_range(250..750))).await;
+            if cursor > to_block {
+                let delay_ms: u64 = rand::thread_rng().gen_range(250..=750);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 continue;
             }
 
-            let processor_events = retry_rpc_call(
-                || {
-                    let client = client.clone();
-                    async move {
-                        client
+            let topic1 = processor.topic1();
+            let topic2 = processor.topic2();
+            let client_ref = client; // &dyn EthClient
+
+            // Process in bounded chunks
+            while cursor <= to_block {
+                let chunk_end = min(cursor.saturating_add(MAX_LOG_RANGE_BLOCKS - 1), to_block);
+                let from = cursor;
+                let to = chunk_end;
+
+                let processor_events = retry_with_backoff_no_state(
+                    || async move {
+                        client_ref
                             .get_events(
-                                Web3BlockNumber::Number(from_block.into()),
-                                Web3BlockNumber::Number(to_block.into()),
-                                processor.topic1(),
-                                processor.topic2(),
+                                Web3BlockNumber::Number(from.into()),
+                                Web3BlockNumber::Number(to.into()),
+                                topic1,
+                                topic2,
                                 RETRY_LIMIT,
                             )
                             .await
-                    }
-                },
-                5,
-            )
-            .await
-            .map_err(|e| {
-                tracing::warn!("get_events failed after retries: {:?}", e);
-                EventProcessorError::Other(anyhow::anyhow!("RPC call failed after retries"))
-            })?;
-
-
-            let processed_events_count = processor
-                .process_events(storage, processor_events.clone())
-                .await?;
-
-            let next_block_to_process = if processed_events_count == processor_events.len() {
-                to_block + 1
-            } else if processed_events_count == 0 {
-                //nothing was processed
-                from_block
-            } else {
-                processor_events[processed_events_count - 1]
-                    .block_number
-                    .expect("Event block number is missing")
-                    .try_into()
-                    .unwrap()
-            };
-
-            storage
-                .eth_watcher_dal()
-                .update_next_block_to_process(
-                    processor.event_type(),
-                    chain_id,
-                    next_block_to_process,
+                    },
+                    5,
                 )
                 .await
-                .map_err(DalError::generalize)?;
+                .map_err(EventProcessorError::from)?;
+
+                let processed = processor
+                    .process_events(storage, processor_events.clone())
+                    .await?;
+
+                // Compute next cursor just like the original logic, but per-chunk
+                let next_block_to_process = if processed == processor_events.len() {
+                    // everything from this chunk processed → advance past the chunk
+                    to.saturating_add(1)
+                } else if processed == 0 {
+                    // nothing processed → do not advance; prevents skipping
+                    from
+                } else {
+                    // advance to the block of the last processed event
+                    processor_events[processed - 1]
+                        .block_number
+                        .expect("Event block number is missing")
+                        .try_into()
+                        .unwrap()
+                };
+
+                storage
+                    .eth_watcher_dal()
+                    .update_next_block_to_process(
+                        processor.event_type(),
+                        chain_id,
+                        next_block_to_process,
+                    )
+                    .await
+                    .map_err(DalError::generalize)?;
+
+                // Move the cursor; guard against no-advance to avoid infinite loop
+                if next_block_to_process <= cursor {
+                    // small nap and bump one block to make progress
+                    let delay_ms: u64 = rand::thread_rng().gen_range(150..=350);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    cursor = cursor.saturating_add(1);
+                } else {
+                    cursor = next_block_to_process;
+                }
+
+                // Optional: short jitter between chunks to be nicer to the provider
+                let inter_ms: u64 = rand::thread_rng().gen_range(10..=25);
+                tokio::time::sleep(Duration::from_millis(inter_ms)).await;
+            }
         }
 
-        // Add loop delay to reduce hammering even if some work was done
-        tokio::time::sleep(Duration::from_millis(rand::thread_rng().gen_range(500..1500))).await;
-
+        // Tail delay
+        let tail_ms: u64 = rand::thread_rng().gen_range(500..=1500);
+        tokio::time::sleep(Duration::from_millis(tail_ms)).await;
         Ok(())
     }
 }

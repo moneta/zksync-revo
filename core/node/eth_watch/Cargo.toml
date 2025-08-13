@@ -22,6 +22,7 @@ zksync_shared_metrics.workspace = true
 zksync_mini_merkle_tree.workspace = true
 zksync_config.workspace = true
 zksync_web3_decl.workspace = true
+zksync_utils.workspace = true
 
 tokio = { workspace = true, features = ["time"] }
 anyhow.workspace = true
@@ -30,6 +31,7 @@ async-trait.workspace = true
 tracing.workspace = true
 async-recursion.workspace = true
 itertools.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 zksync_concurrency.workspace = true

@@ -1,6 +1,7 @@
 use std::{
     sync::Arc,
     time::{Duration, SystemTime},
+    pin::Pin
 };
 
 use tokio::sync::watch;
@@ -28,7 +29,7 @@ use crate::{
     health::{EthTxDetails, EthTxManagerHealthDetails},
     metrics::TransactionType,
 };
-use zksync_utils::retry::retry_rpc_call;
+use zksync_utils::retry::retry_with_backoff;
 
 /// The component is responsible for managing sending eth_txs attempts.
 ///
@@ -797,19 +798,14 @@ impl EthTxManager {
         // a PublishProof transaction
         for operator_type in self.l1_interface.supported_operator_types() {
             // PATCH: Add retry wrapper to protect L1 RPC
-            let l1_block_numbers = match retry_rpc_call(
-                || {
-                    let operator_type = operator_type.clone();
-                    async move { self.l1_interface.get_l1_block_numbers(operator_type).await }
-                },
-                5,
-            )
-            .await
-            {
+            let l1_block_numbers = match retry_with_backoff(self, |s| {
+                let op = operator_type.clone();
+                Box::pin(async move { s.l1_interface.get_l1_block_numbers(op).await })
+            }, 5).await {
                 Ok(res) => res,
                 Err(err) => {
                     tracing::warn!("Failed to fetch L1 block numbers after retries: {:?}", err);
-                    continue; // skip this operator_type on failure
+                    continue;
                 }
             };
 
