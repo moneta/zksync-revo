@@ -1,7 +1,6 @@
 use std::{
     sync::Arc,
-    time::{Duration, SystemTime},
-    pin::Pin
+    time::{Duration, SystemTime}
 };
 
 use tokio::sync::watch;
