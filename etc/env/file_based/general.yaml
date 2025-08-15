@@ -116,6 +116,7 @@ eth:
   watcher:
     confirmations_for_eth_event: 0
     eth_node_poll_interval: 300
+    event_expiration_blocks: 900
 
 snapshot_creator:
   # CHANGE: switch to inner tagged enum in object store
