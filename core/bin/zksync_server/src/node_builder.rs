@@ -177,6 +177,7 @@ impl MainNodeBuilder {
         let query_eth_client_layer = QueryEthClientLayer::new(
             genesis.l1_chain_id,
             eth_config.l1_rpc_url.context("No L1 RPC URL")?,
+            eth_config.google_api_key.clone(),
         );
         self.node.add_layer(query_eth_client_layer);
         Ok(self)

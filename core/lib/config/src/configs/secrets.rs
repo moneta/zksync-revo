@@ -35,6 +35,9 @@ pub struct L1Secrets {
     /// RPC URL for the gateway layer.
     #[config(alias = "gateway_web3_url", secret, with = Optional(Serde![str]))]
     pub gateway_rpc_url: Option<SensitiveUrl>,
+    /// Google API key for the Google Full Node.
+    #[config(alias = "google_api_key", secret, with = Optional(Serde![str]))]
+    pub google_api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, DescribeConfig, DeserializeConfig)]

@@ -21,6 +21,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use http::{HeaderMap};
 use jsonrpsee::{
     core::{
         client::{BatchResponse, ClientT, Error, Subscription, SubscriptionClientT},
@@ -144,7 +145,16 @@ impl<Net: Network> Client<Net> {
     pub fn http(url: SensitiveUrl) -> anyhow::Result<ClientBuilder<Net>> {
         crate::client::rustls::set_rustls_backend_if_required();
 
-        let client = HttpClientBuilder::default().build(url.expose_str())?;
+        let client = HttpClientBuilder::default()
+            .build(url.expose_str())?;
+        Ok(ClientBuilder::new(client, url))
+    }
+
+    pub fn http_with_headers(url: SensitiveUrl, headers: HeaderMap) -> anyhow::Result<ClientBuilder<Net>> {
+        crate::client::rustls::set_rustls_backend_if_required();
+        let client = jsonrpsee::http_client::HttpClientBuilder::default()
+            .set_headers(headers)
+            .build(url.expose_str())?;
         Ok(ClientBuilder::new(client, url))
     }
 }

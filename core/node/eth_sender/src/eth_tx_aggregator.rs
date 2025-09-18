@@ -1,4 +1,4 @@
-use std::{collections::HashMap};
+use std::{collections::HashMap, time::Duration};
 
 use tokio::sync::watch;
 use zksync_config::configs::eth_sender::SenderConfig;
@@ -39,6 +39,7 @@ use crate::{
     Aggregator, EthSenderError,
 };
 use zksync_utils::retry::retry_with_backoff;
+use rand::Rng;
 
 #[derive(Debug)]
 pub struct DAValidatorPair {
@@ -696,6 +697,11 @@ impl EthTxAggregator {
                 .into(),
             );
         }
+
+        // Tail delay
+        let tail_ms: u64 = rand::thread_rng().gen_range(500..=1500);
+        tokio::time::sleep(Duration::from_millis(tail_ms)).await;
+        
         Ok(())
     }
 

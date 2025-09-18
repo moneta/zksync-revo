@@ -1,6 +1,7 @@
 use std::{
     sync::Arc,
-    time::{Duration, SystemTime}
+    time::{Instant, Duration, SystemTime},
+    collections::HashMap
 };
 
 use tokio::sync::watch;
@@ -28,7 +29,7 @@ use crate::{
     health::{EthTxDetails, EthTxManagerHealthDetails},
     metrics::TransactionType,
 };
-use zksync_utils::retry::retry_with_backoff;
+use rand::Rng;
 
 /// The component is responsible for managing sending eth_txs attempts.
 ///
@@ -36,12 +37,20 @@ use zksync_utils::retry::retry_with_backoff;
 /// save it to the database, and send it to Ethereum.
 /// Based on eth_tx_history queue the component can mark txs as stuck and create the new attempt
 /// with higher gas price
+
+#[derive(Debug, Default, Clone)]
+struct StatusPacing {
+    next_scan_at_block: u32, // next L1 block height at which we will scan statuses
+    backoff_pow: u8,         // 0..=6 -> stride 1,2,4,8,16,32,64
+}
+
 #[derive(Debug)]
 pub struct EthTxManager {
     l1_interface: Box<dyn AbstractL1Interface>,
     config: SenderConfig,
     fees_oracle: Box<dyn EthFeesOracle>,
     pool: ConnectionPool<Core>,
+    status_pacing: HashMap<OperatorType, StatusPacing>,
     health_updater: HealthUpdater,
 }
 
@@ -86,6 +95,7 @@ impl EthTxManager {
             config,
             fees_oracle: Box::new(fees_oracle),
             pool,
+            status_pacing: Default::default(),
             health_updater: ReactiveHealthCheck::new("eth_tx_manager").1,
         }
     }
@@ -675,39 +685,128 @@ impl EthTxManager {
         METRICS.l1_blocks_waited_in_mempool[&tx_type_label].observe(waited_blocks.into());
     }
 
-    pub async fn run(mut self, stop_receiver: watch::Receiver<bool>) -> anyhow::Result<()> {
+    pub async fn run(mut self, mut stop_receiver: watch::Receiver<bool>) -> anyhow::Result<()> {
         self.health_updater
             .update(Health::from(HealthStatus::Ready));
 
         let pool = self.pool.clone();
 
-        loop {
-            tokio::time::sleep(self.config.tx_poll_period).await;
-            let mut storage = pool.connection_tagged("eth_sender").await.unwrap();
+        let mut retriable_attempt: u32 = 0;
 
+        let mut last_blocks: Option<L1BlockNumbers> = None;
+        let mut last_blocks_at: Option<Instant> = None;
+        const MIN_BLOCK_REFRESH: Duration = Duration::from_secs(1); // tune if you want
+
+        loop {
+            // sleep the base poll period unless we are backing off due to errors
+            let base_sleep = tokio::time::sleep(self.config.tx_poll_period);
+            tokio::pin!(base_sleep);
+
+            tokio::select! {
+                _ = &mut base_sleep => {},
+                _ = stop_receiver.changed() => {
+                    if *stop_receiver.borrow() {
+                        tracing::info!("Stop request received, eth_tx_manager is shutting down");
+                        break;
+                    }
+                }
+            }
+
+            let now = Instant::now();
+            let need_refresh = last_blocks_at.map_or(true, |t| now.duration_since(t) >= MIN_BLOCK_REFRESH);
+
+            let mut storage = pool.connection_tagged("eth_sender").await.unwrap();
             if *stop_receiver.borrow() {
                 tracing::info!("Stop request received, eth_tx_manager is shutting down");
                 break;
             }
-            let operator_to_track = self.l1_interface.supported_operator_types()[0];
-            let l1_block_numbers = self
-                .l1_interface
-                .get_l1_block_numbers(operator_to_track)
-                .await;
 
-            if let Err(ref error) = l1_block_numbers {
-                // Web3 API request failures can cause this,
-                // and anything more important is already properly reported.
-                tracing::warn!("eth_sender error {:?}", error);
-                if error.is_retriable() {
-                    METRICS.l1_transient_errors.inc();
-                    continue;
+            let l1_block_numbers = if need_refresh {
+               // Fetch ONCE per loop (pick any supported operator; numbers are chain-wide)
+                let operator_to_track = self.l1_interface.supported_operator_types()[0];
+                match self.l1_interface.get_l1_block_numbers(operator_to_track).await {
+                    Ok(nums) => {
+                        retriable_attempt = 0;
+                        METRICS.track_block_numbers(&nums);
+                        last_blocks = Some(nums.clone());
+                        last_blocks_at = Some(now);
+                        nums
+                    }
+                    Err(ref error) => {
+                        tracing::warn!("eth_sender error {:?}", error);
+                        if error.is_retriable() {
+                            METRICS.l1_transient_errors.inc();
+
+                            // backoff, shutdown-aware
+                            let exp = 1u64 << retriable_attempt.min(6);
+                            let delay_ms = exp * 200 + rand::thread_rng().gen_range(0..200);
+                            let backoff_sleep = tokio::time::sleep(Duration::from_millis(delay_ms));
+                            tokio::pin!(backoff_sleep);
+                            tokio::select! {
+                                _ = &mut backoff_sleep => {},
+                                _ = stop_receiver.changed() => {
+                                    if *stop_receiver.borrow() {
+                                        tracing::info!("Stop request received during backoff, shutting down");
+                                        break;
+                                    }
+                                }
+                            }
+                            retriable_attempt = retriable_attempt.saturating_add(1);
+                            // If we have a cached value, use it; else continue to next loop
+                            if let Some(cached) = &last_blocks {
+                                cached.clone()
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            // non-retriable; use cached if present or skip
+                            if let Some(cached) = &last_blocks {
+                                cached.clone()
+                            } else {
+                                continue;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // reuse cached value within TTL
+                last_blocks.as_ref().expect("cached blocks").clone()
+            };
+
+            // Use the (possibly cached) numbers for ALL operators in this iteration
+            let res = self.loop_iteration(&mut storage, l1_block_numbers.clone()).await;
+            match res {
+                Ok(()) => {
+                    retriable_attempt = 0; // clear outer backoff on success
+                }
+                Err(e) => {
+                    // Back off on retriable inner errors too
+                    if e.is_retriable() {
+                        METRICS.l1_transient_errors.inc();
+                        let exp = 1u64 << retriable_attempt.min(6);
+                        let delay_ms = exp * 200 + rand::thread_rng().gen_range(0..200);
+                        let backoff_sleep = tokio::time::sleep(Duration::from_millis(delay_ms));
+                        tokio::pin!(backoff_sleep);
+                        tokio::select! {
+                            _ = &mut backoff_sleep => {},
+                            _ = stop_receiver.changed() => {
+                                if *stop_receiver.borrow() {
+                                    tracing::info!("Stop request received during backoff, shutting down");
+                                    break;
+                                }
+                            }
+                        }
+                        retriable_attempt = retriable_attempt.saturating_add(1);
+                    } else {
+                        // non-retriable -> just log and continue; or decide to break
+                        retriable_attempt = 0;
+                    }
                 }
             }
 
-            METRICS.track_block_numbers(&l1_block_numbers?);
-
-            self.loop_iteration(&mut storage).await;
+            // Optional: small jitter so multiple pods de-phase a bit
+            // let jitter_ms: u64 = rand::thread_rng().gen_range(20..=80);
+            // tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
         }
         Ok(())
     }
@@ -718,6 +817,7 @@ impl EthTxManager {
         current_block: L1BlockNumber,
         operator_type: OperatorType,
     ) {
+        // Current inflight count
         let number_inflight_txs = storage
             .eth_sender_dal()
             .get_inflight_txs(
@@ -727,107 +827,183 @@ impl EthTxManager {
             .await
             .unwrap()
             .len();
-        let number_of_available_slots_for_eth_txs = self
+        
+        // Available slots by config
+        let available_slots = self
             .config
             .max_txs_in_flight
             .saturating_sub(number_inflight_txs as u64);
 
-        if number_of_available_slots_for_eth_txs > 0 {
-            // Get the new eth tx and create history item for them
-            let new_eth_tx = storage
-                .eth_sender_dal()
-                .get_new_eth_txs(
-                    number_of_available_slots_for_eth_txs,
-                    self.operator_address(operator_type),
-                    operator_type == OperatorType::Gateway,
-                )
-                .await
-                .unwrap();
+        if available_slots == 0 {
+            tracing::debug!("No {operator_type:?} slots available for new txs");
+            return;
+        }
 
-            if !new_eth_tx.is_empty() {
-                tracing::info!(
-                    "Sending {} {operator_type:?} new transactions",
-                    new_eth_tx.len()
-                );
-            } else {
-                tracing::debug!("No new {operator_type:?} transactions to send");
+        // Hard cap: how many *new* txs we allow per iteration (tunable)
+    // If you have a config knob, use it; otherwise use a small default like 2.
+    const MAX_NEW_TXS_PER_ITER: u64 = 2;
+    let to_take = available_slots.min(MAX_NEW_TXS_PER_ITER);
+
+    let new_eth_tx = storage
+        .eth_sender_dal()
+        .get_new_eth_txs(
+            to_take,
+            self.operator_address(operator_type),
+            operator_type == OperatorType::Gateway,
+        )
+        .await
+        .unwrap();
+
+        if new_eth_tx.is_empty() {
+            tracing::debug!("No new {operator_type:?} transactions to send");
+            return;
+        }
+
+        tracing::info!(
+            "Sending up to {} {operator_type:?} new transactions ({} available slots, {} inflight)",
+            new_eth_tx.len(),
+            available_slots,
+            number_inflight_txs
+        );
+
+        for tx in new_eth_tx {
+            let result = self.send_eth_tx(storage, &tx, 0, current_block).await;
+            // If sending didn't succeed, we do not try to send next transactions
+            // as we rely on `sent_successfully` being set sequentially.
+            // Also, it doesn't make much sense to try anyway since we will get an error most likely
+            // (nonce-too-high for blob transactions is guaranteed).
+            if result.is_err() {
+                tracing::info!("Halting further sends for {operator_type:?} due to error on this tx");
+                break;
             }
-            for tx in new_eth_tx {
-                let result = self.send_eth_tx(storage, &tx, 0, current_block).await;
-                // If sending didn't succeed, we do not try to send next transactions
-                // as we rely on `sent_successfully` being set sequentially.
-                // Also, it doesn't make much sense to try anyway since we will get an error most likely
-                // (nonce-too-high for blob transactions is guaranteed).
-                if result.is_err() {
-                    tracing::info!("Skipping sending rest of new transactions because of error");
-                    break;
-                }
-            }
+
+            // Tiny jitter between sends to avoid request bursts across replicas
+            let delay_ms: u64 = rand::thread_rng().gen_range(60..=150);
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         }
     }
 
-    async fn update_statuses_and_resend_if_needed(
+    pub async fn update_statuses_and_resend_if_needed(
         &mut self,
         storage: &mut Connection<'_, Core>,
         l1_block_numbers: L1BlockNumbers,
         operator_type: OperatorType,
     ) -> Result<(), EthSenderError> {
-        if let Some((tx, sent_at_block)) = self
-            .monitor_inflight_transactions_single_operator(storage, l1_block_numbers, operator_type)
-            .await?
-        {
-            // New gas price depends on the time this tx spent in mempool.
-            let time_in_mempool_in_l1_blocks = l1_block_numbers.latest.0 - sent_at_block;
+        // Make the type explicit to match your L1BlockNumber.0
+        let current: u32 = l1_block_numbers.latest.0;
 
-            self.send_eth_tx(
-                storage,
-                &tx,
-                time_in_mempool_in_l1_blocks,
-                l1_block_numbers.latest,
-            )
-            .await?;
+        // Snapshot pacing WITHOUT holding a &mut across await
+        let (mut next_scan_at_block, mut backoff_pow): (u32, u8) = {
+            let p = self.status_pacing.entry(operator_type.clone()).or_default();
+            (p.next_scan_at_block, p.backoff_pow)
+        };
+
+        if current < next_scan_at_block {
+            tracing::debug!(
+                ?operator_type,
+                current,
+                next = next_scan_at_block,
+                "Skipping inflight status scan due to pacing"
+            );
+            return Ok(());
         }
+
+        // Do the scan without holding &mut pacing
+        let scan = self
+            .monitor_inflight_transactions_single_operator(
+                storage,
+                l1_block_numbers.clone(),
+                operator_type.clone(),
+            )
+            .await;
+
+        match scan {
+            Ok(Some((tx, sent_at_block))) => {
+                let time_in_mempool_in_l1_blocks: u32 = current.saturating_sub(sent_at_block);
+                self.send_eth_tx(
+                    storage,
+                    &tx,
+                    time_in_mempool_in_l1_blocks,
+                    l1_block_numbers.latest,
+                )
+                .await?;
+
+                // Reset pacing on actionable work
+                backoff_pow = 0;
+                next_scan_at_block = current.saturating_add(1);
+            }
+            Ok(None) => {
+                backoff_pow = backoff_pow.saturating_add(1u8).min(6);
+                let shift: u32 = u32::from(backoff_pow); // 0..=6
+                let stride: u32 = 1u32 << shift;
+                next_scan_at_block = current.saturating_add(stride);
+                tracing::debug!(
+                    ?operator_type,
+                    current,
+                    stride,
+                    next = next_scan_at_block,
+                    "No inflight action; backing off status scans"
+                );
+            }
+            Err(e) => {
+                let stride: u32 = if e.is_retriable() {
+                    backoff_pow = backoff_pow.saturating_add(1u8).min(6);
+                    let shift: u32 = u32::from(backoff_pow).min(31);
+                    1u32 << shift
+                } else {
+                    1
+                };
+                next_scan_at_block = current.saturating_add(stride);
+
+                // Persist pacing update then return the error
+                let p = self.status_pacing.entry(operator_type).or_default();
+                p.backoff_pow = backoff_pow;
+                p.next_scan_at_block = next_scan_at_block;
+
+                return Err(e);
+            }
+        }
+
+        // Persist pacing update on success paths
+        let p = self.status_pacing.entry(operator_type).or_default();
+        p.backoff_pow = backoff_pow;
+        p.next_scan_at_block = next_scan_at_block;
+
         Ok(())
     }
 
     #[tracing::instrument(skip_all, name = "EthTxManager::loop_iteration")]
-    pub async fn loop_iteration(&mut self, storage: &mut Connection<'_, Core>) {
+    pub async fn loop_iteration(
+        &mut self,
+        storage: &mut Connection<'_, Core>,
+        l1_block_numbers: L1BlockNumbers, // <-- accept pre-fetched numbers
+    ) -> Result<(), EthSenderError> {
         // We can treat blob and non-blob operators independently as they have different nonces and
         // aggregator makes sure that corresponding Commit transaction is confirmed before creating
         // a PublishProof transaction
         for operator_type in self.l1_interface.supported_operator_types() {
-            // PATCH: Add retry wrapper to protect L1 RPC
-            let l1_block_numbers = match retry_with_backoff(self, |s| {
-                let op = operator_type.clone();
-                Box::pin(async move { s.l1_interface.get_l1_block_numbers(op).await })
-            }, 5).await {
-                Ok(res) => res,
-                Err(err) => {
-                    tracing::warn!("Failed to fetch L1 block numbers after retries: {:?}", err);
-                    continue;
-                }
-            };
-
             tracing::debug!(
                 "Loop iteration at block {} for {operator_type:?} operator",
                 l1_block_numbers.latest
             );
-            self.send_new_eth_txs(storage, l1_block_numbers.latest, operator_type)
-                .await;
-            let result = self
-                .update_statuses_and_resend_if_needed(storage, l1_block_numbers, operator_type)
-                .await;
 
-            //We don't want an error in sending non-blob transactions interrupt sending blob txs
-            if let Err(error) = result {
-                // Web3 API request failures can cause this,
-                // and anything more important is already properly reported.
+            // sending new txs doesn't return Result; keep as-is
+            self.send_new_eth_txs(storage, l1_block_numbers.latest, operator_type).await;
+
+            // propagate first error so outer loop can back off
+            if let Err(error) = self
+                .update_statuses_and_resend_if_needed(storage, l1_block_numbers.clone(), operator_type)
+                .await
+            {
+                // Log + bubble up
                 tracing::warn!("eth_sender error {:?}", error);
                 if error.is_retriable() {
                     METRICS.l1_transient_errors.inc();
                 }
+                return Err(error);
             }
         }
+        Ok(())
     }
 
     /// Returns the health check for eth tx manager.

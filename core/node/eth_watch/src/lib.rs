@@ -2,20 +2,20 @@
 //! protocol upgrades etc.
 //! New events are accepted to the ZKsync network once they have the sufficient amount of L1 confirmations.
 
-use std::{sync::Arc, time::Duration, cmp::min};
-
+use std::{sync::Arc, cmp::min, collections::HashMap};
+use tokio::time::{Duration, MissedTickBehavior};
 use anyhow::Context as _;
 use tokio::sync::watch;
 use zksync_dal::{Connection, ConnectionPool, Core, CoreDal, DalError};
 use zksync_mini_merkle_tree::MiniMerkleTree;
 use zksync_types::{
     protocol_version::ProtocolSemanticVersion, settlement::SettlementLayer,
-    web3::BlockNumber as Web3BlockNumber, L1BatchNumber, L2ChainId, PriorityOpId,
+    api::Log, web3::BlockNumber as Web3BlockNumber, L1BatchNumber, L2ChainId, PriorityOpId,H256
 };
 
 pub use self::client::{EthClient, EthHttpQueryClient, GetLogsClient, ZkSyncExtentionEthClient};
 use self::{
-    client::RETRY_LIMIT,
+    // client::RETRY_LIMIT,
     event_processors::{EventProcessor, EventProcessorError, PriorityOpsEventProcessor},
     metrics::METRICS,
 };
@@ -34,6 +34,13 @@ mod metrics;
 pub mod node;
 #[cfg(test)]
 mod tests;
+
+struct PState {
+    idx: usize,
+    cursor: u64,
+    topic1: Option<H256>,
+    topic2: Option<H256>,
+}
 
 #[derive(Debug)]
 struct EthWatchState {
@@ -152,8 +159,10 @@ impl EthWatch {
 
     pub async fn run(mut self, mut stop_receiver: watch::Receiver<bool>) -> anyhow::Result<()> {
         let mut timer = tokio::time::interval(self.poll_interval);
+        timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let pool = self.pool.clone();
-
+       
+        let mut attempt: u32 = 0;
         while !*stop_receiver.borrow_and_update() {
             tokio::select! {
                 _ = timer.tick() => { /* continue iterations */ }
@@ -165,6 +174,7 @@ impl EthWatch {
                 Ok(()) => {
                     /* everything went fine */
                     METRICS.eth_poll.inc();
+                    attempt = 0; // <-- reset backoff on success
                 }
                 Err(EventProcessorError::Internal(err)) => {
                     tracing::error!("Internal error processing new blocks: {err:?}");
@@ -174,11 +184,15 @@ impl EthWatch {
                     // This is an error because otherwise we could potentially miss a priority operation
                     // thus entering priority mode, which is not desired.
                     tracing::error!("Failed to process new blocks: {err}");
+                    let exp = 1u64 << attempt.min(6);
+                    let delay_ms = exp * 200 + rand::thread_rng().gen_range(0..200);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    attempt = attempt.saturating_add(1);
                 }
             }
         }
 
-        tracing::info!("Stop request received, eth_watch is shutting down");
+        tracing::info!("Stop signal received, eth_watch is shutting down");
         Ok(())
     }
 
@@ -187,111 +201,241 @@ impl EthWatch {
         &mut self,
         storage: &mut Connection<'_, Core>,
     ) -> Result<(), EventProcessorError> {
-        for processor in &mut self.event_processors {
-            let client = match processor.event_source() {
-                EventsSource::L1 => self.l1_client.as_ref(),
-                EventsSource::SL => self.sl_client.as_ref(),
-            };
-            let chain_id = client.chain_id().await?;
+        const GET_EVENTS_INTERNAL_RETRY_LIMIT: usize = 0;
+        const MAX_RPCS_PER_ITER_PER_SOURCE: usize = 9;
+        const INTER_CHUNK_JITTER_MS_MIN: u64 = 60;
+        const INTER_CHUNK_JITTER_MS_MAX: u64 = 150;
 
-            let to_block = if processor.only_finalized_block() {
-                client.finalized_block_number().await?
-            } else {
-                client.confirmed_block_number().await?
-            };
-
-            let mut cursor = storage
-                .eth_watcher_dal()
-                .get_or_set_next_block_to_process(
-                    processor.event_type(),
-                    chain_id,
-                    to_block.saturating_sub(self.event_expiration_blocks),
-                )
-                .await
-                .map_err(DalError::generalize)?;
-
-            if cursor > to_block {
-                let delay_ms: u64 = rand::thread_rng().gen_range(250..=750);
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        for source in [EventsSource::L1, EventsSource::SL].iter() {
+            // Gather indices of processors for this source
+            let proc_indices: Vec<usize> = self
+            .event_processors
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| (p.event_source() == *source).then_some(i))
+            .collect();
+            if proc_indices.is_empty() {
                 continue;
             }
 
-            let topic1 = processor.topic1();
-            let topic2 = processor.topic2();
-            let client_ref = client; // &dyn EthClient
+            // Resolve client for this source
+            let client: &dyn EthClient = match source {
+                &EventsSource::L1 => self.l1_client.as_ref(),
+                &EventsSource::SL => self.sl_client.as_ref(),
+            };
 
-            // Process in bounded chunks
-            while cursor <= to_block {
-                let chunk_end = min(cursor.saturating_add(MAX_LOG_RANGE_BLOCKS - 1), to_block);
-                let from = cursor;
-                let to = chunk_end;
+            let chain_id = retry_with_backoff_no_state(|| async { client.chain_id().await }, 5).await?;
 
-                let processor_events = retry_with_backoff_no_state(
-                    || async move {
-                        client_ref
-                            .get_events(
-                                Web3BlockNumber::Number(from.into()),
-                                Web3BlockNumber::Number(to.into()),
-                                topic1,
-                                topic2,
-                                RETRY_LIMIT,
-                            )
-                            .await
-                    },
-                    5,
+            // Only fetch tips we actually need for this source
+            let have_confirmed = proc_indices
+                .iter()
+                .any(|&i| !self.event_processors[i].only_finalized_block());
+            let have_finalized = proc_indices
+                .iter()
+                .any(|&i| self.event_processors[i].only_finalized_block());
+
+            let to_block_confirmed = if have_confirmed {
+                Some(
+                    retry_with_backoff_no_state(|| async { client.confirmed_block_number().await }, 5)
+                        .await?,
                 )
-                .await
-                .map_err(EventProcessorError::from)?;
+            } else {
+                None
+            };
+            let to_block_finalized = if have_finalized {
+                Some(
+                    retry_with_backoff_no_state(|| async { client.finalized_block_number().await }, 5)
+                        .await?,
+                )
+            } else {
+                None
+            };
 
-                let processed = processor
-                    .process_events(storage, processor_events.clone())
-                    .await?;
+            // Shared get_events budget across BOTH buckets for this source (confirmed + finalized)
+            let mut rpc_budget_total = MAX_RPCS_PER_ITER_PER_SOURCE;
 
-                // Compute next cursor just like the original logic, but per-chunk
-                let next_block_to_process = if processed == processor_events.len() {
-                    // everything from this chunk processed → advance past the chunk
-                    to.saturating_add(1)
-                } else if processed == 0 {
-                    // nothing processed → do not advance; prevents skipping
-                    from
+            for finalized_only in [false, true] {
+                if rpc_budget_total == 0 { break; }
+                let to_block = if finalized_only {
+                    match to_block_finalized {
+                        Some(v) => v,
+                        None => continue,
+                    }
                 } else {
-                    // advance to the block of the last processed event
-                    processor_events[processed - 1]
-                        .block_number
-                        .expect("Event block number is missing")
-                        .try_into()
-                        .unwrap()
+                    match to_block_confirmed {
+                        Some(v) => v,
+                        None => continue,
+                    }
                 };
 
-                storage
-                    .eth_watcher_dal()
-                    .update_next_block_to_process(
-                        processor.event_type(),
-                        chain_id,
-                        next_block_to_process,
-                    )
-                    .await
-                    .map_err(DalError::generalize)?;
-
-                // Move the cursor; guard against no-advance to avoid infinite loop
-                if next_block_to_process <= cursor {
-                    // small nap and bump one block to make progress
-                    let delay_ms: u64 = rand::thread_rng().gen_range(150..=350);
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    cursor = cursor.saturating_add(1);
-                } else {
-                    cursor = next_block_to_process;
+                let mut states: Vec<PState> = Vec::new();
+                for &i in &proc_indices {
+                    // Only include processors that match this bucket
+                    if self.event_processors[i].only_finalized_block() != finalized_only {
+                        continue;
+                    }
+                    let cursor = storage
+                        .eth_watcher_dal()
+                        .get_or_set_next_block_to_process(
+                            self.event_processors[i].event_type(),
+                            chain_id,
+                            to_block.saturating_sub(self.event_expiration_blocks),
+                        )
+                        .await
+                        .map_err(DalError::generalize)?;
+                    if cursor > to_block {
+                        continue;
+                    }
+                    states.push(PState {
+                        idx: i,
+                        cursor,
+                        topic1: self.event_processors[i].topic1(),
+                        topic2: self.event_processors[i].topic2(),
+                    });
+                }
+                if states.is_empty() {
+                    continue;
                 }
 
-                // Optional: short jitter between chunks to be nicer to the provider
-                let inter_ms: u64 = rand::thread_rng().gen_range(10..=25);
-                tokio::time::sleep(Duration::from_millis(inter_ms)).await;
+                while rpc_budget_total > 0 {
+                    // Earliest outstanding cursor among processors
+                    let maybe_from = states
+                        .iter()
+                        .filter(|s| s.cursor <= to_block)
+                        .map(|s| s.cursor)
+                        .min();
+                    let from = match maybe_from {
+                        Some(f) => f,
+                        None => break, // all caught up
+                    };
+                    let to = min(from.saturating_add(MAX_LOG_RANGE_BLOCKS - 1), to_block);
+
+                    // Group processors by (topic1, topic2), cap by remaining budget
+                    let mut groups_map: HashMap<(Option<H256>, Option<H256>), Vec<usize>> =
+                        HashMap::new();
+                    for (st_idx, s) in states.iter().enumerate() {
+                        if s.cursor <= to {
+                            groups_map
+                                .entry((s.topic1, s.topic2))
+                                .or_default()
+                                .push(st_idx);
+                        }
+                    }
+                    if groups_map.is_empty() {
+                        break;
+                    }
+                    let mut groups: Vec<((Option<H256>, Option<H256>), Vec<usize>)> =
+                        groups_map.into_iter().collect();
+                    if groups.len() > rpc_budget_total {
+                        groups.truncate(rpc_budget_total);
+                    }
+
+                    // Fetch once per pair, reuse results and sort logs for stable cursor math
+                    let mut fetched_by_pair: HashMap<(Option<H256>, Option<H256>), Vec<Log>> =
+                        HashMap::with_capacity(groups.len());
+
+                    for &((t1, t2), _) in &groups {
+                        let mut logs = retry_with_backoff_no_state(
+                            || async {
+                                client
+                                    .get_events(
+                                        Web3BlockNumber::Number(from.into()),
+                                        Web3BlockNumber::Number(to.into()),
+                                        t1,
+                                        t2,
+                                        GET_EVENTS_INTERNAL_RETRY_LIMIT,
+                                    )
+                                    .await
+                            },
+                            5,
+                        )
+                        .await
+                        .map_err(EventProcessorError::from)?;
+
+                        logs.sort_by(|a, b| {
+                            let abn = a.block_number.unwrap_or_default();
+                            let bbn = b.block_number.unwrap_or_default();
+                            if abn != bbn {
+                                abn.cmp(&bbn)
+                            } else {
+                                a.log_index
+                                    .unwrap_or_default()
+                                    .cmp(&b.log_index.unwrap_or_default())
+                            }
+                        });
+
+                        fetched_by_pair.insert((t1, t2), logs);
+                    }
+
+                    // Distribute logs to each processor; borrow &mut just-in-time
+                    for ((pair_t1, pair_t2), st_indices) in groups {
+                        let pair_logs = fetched_by_pair
+                            .get(&(pair_t1, pair_t2))
+                            .expect("logs fetched");
+                        for st_i in st_indices {
+                            // Read fields with explicit type so the compiler knows this is PState
+                            let (idx, cursor_before) = {
+                                let s: &PState = &states[st_i];
+                                (s.idx, s.cursor)
+                            };
+
+                            // Short-lived &mut borrow for processing
+                            let processed = {
+                                let proc = &mut *self.event_processors[idx];
+                                proc.process_events(storage, pair_logs.clone()).await?
+                            };
+
+                            let next_block_to_process = if processed == pair_logs.len() {
+                                to.saturating_add(1)
+                            } else if processed == 0 {
+                                from
+                            } else {
+                                pair_logs[processed - 1]
+                                    .block_number
+                                    .expect("Event block number is missing")
+                                    .try_into()
+                                    .unwrap()
+                            };
+
+                            storage
+                                .eth_watcher_dal()
+                                .update_next_block_to_process(
+                                    self.event_processors[idx].event_type(),
+                                    chain_id,
+                                    next_block_to_process,
+                                )
+                                .await
+                                .map_err(DalError::generalize)?;
+
+                            // Update local state; avoid no-progress
+                            let s: &mut PState = &mut states[st_i];
+                            if next_block_to_process <= cursor_before {
+                                let delay_ms: u64 =
+                                    rand::thread_rng().gen_range(150..=350);
+                                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                                s.cursor = cursor_before.saturating_add(1);
+                            } else {
+                                s.cursor = next_block_to_process;
+                            }
+                        }
+                    }
+
+                    // Decrement shared per-source budget by #pairs we fetched this chunk
+                    let fetched_count = fetched_by_pair.len();
+                    rpc_budget_total = rpc_budget_total.saturating_sub(fetched_count);
+                    
+                    let inter_ms: u64 = rand::thread_rng().gen_range(INTER_CHUNK_JITTER_MS_MIN..=INTER_CHUNK_JITTER_MS_MAX);
+                    tokio::time::sleep(Duration::from_millis(inter_ms)).await;
+                }
+
+                // Optional: small tail jitter if still behind
+                if states.iter().any(|s| s.cursor <= to_block) {
+                    let tail_ms: u64 = rand::thread_rng().gen_range(200..=600);
+                    tokio::time::sleep(Duration::from_millis(tail_ms)).await;
+                }
             }
         }
 
-        // Tail delay
-        let tail_ms: u64 = rand::thread_rng().gen_range(500..=1500);
-        tokio::time::sleep(Duration::from_millis(tail_ms)).await;
         Ok(())
     }
 }

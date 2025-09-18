@@ -33,7 +33,7 @@ pub(super) enum EventProcessorError {
     Internal(#[from] anyhow::Error),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub(super) enum EventsSource {
     L1,
     SL,
