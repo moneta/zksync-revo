@@ -58,8 +58,8 @@ async fn verify_next_batch_new_version(
         )
     })?;
     ensure!(
-        protocol_version >= ProtocolVersionId::Version28,
-        "THe block does not yet contain the v28 (Precompiles) upgrade"
+        protocol_version >= ProtocolVersionId::Version30,
+        "THe block does not yet contain the v29 (Precompiles) upgrade"
     );
 
     Ok(())

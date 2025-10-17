@@ -73,15 +73,17 @@ pub enum ProtocolVersionId {
     Version27,
     Version28,
     Version29,
+    Version30,
+    Version31,
 }
 
 impl ProtocolVersionId {
     pub const fn latest() -> Self {
-        Self::Version28
+        Self::Version30
     }
 
     pub const fn next() -> Self {
-        Self::Version29
+        Self::Version31
     }
 
     pub fn try_from_packed_semver(packed_semver: U256) -> Result<Self, String> {
@@ -130,6 +132,8 @@ impl ProtocolVersionId {
             ProtocolVersionId::Version28 => VmVersion::VmEcPrecompiles,
             // Speculative VM version for the next protocol version to be used in the upgrade integration test etc.
             ProtocolVersionId::Version29 => VmVersion::VmEcPrecompiles,
+            ProtocolVersionId::Version30 => VmVersion::VmEcPrecompiles,
+            ProtocolVersionId::Version31 => VmVersion::VmEcPrecompiles,
         }
     }
 
@@ -311,6 +315,8 @@ impl From<ProtocolVersionId> for VmVersion {
             ProtocolVersionId::Version28 => VmVersion::VmEcPrecompiles,
             // Speculative VM version for the next protocol version to be used in the upgrade integration test etc.
             ProtocolVersionId::Version29 => VmVersion::VmEcPrecompiles,
+            ProtocolVersionId::Version30 => VmVersion::VmEcPrecompiles,
+            ProtocolVersionId::Version31 => VmVersion::VmEcPrecompiles,
         }
     }
 }
