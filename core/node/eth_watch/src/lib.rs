@@ -176,13 +176,11 @@ impl EthWatch {
                     METRICS.eth_poll.inc();
                     attempt = 0; // <-- reset backoff on success
                 }
-                Err(EventProcessorError::Internal(err)) => {
-                    tracing::error!("Internal error processing new blocks: {err:?}");
-                    return Err(err);
+                Err(EventProcessorError::Fatal(err)) => {
+                    tracing::error!("Fatal error processing new blocks: {err:?}");
+                    return Err(err.into());
                 }
-                Err(err) => {
-                    // This is an error because otherwise we could potentially miss a priority operation
-                    // thus entering priority mode, which is not desired.
+                Err(EventProcessorError::Transient(err)) => {
                     tracing::error!("Failed to process new blocks: {err}");
                     let exp = 1u64 << attempt.min(6);
                     let delay_ms = exp * 200 + rand::thread_rng().gen_range(0..200);
@@ -224,7 +222,9 @@ impl EthWatch {
                 &EventsSource::SL => self.sl_client.as_ref(),
             };
 
-            let chain_id = retry_with_backoff_no_state(|| async { client.chain_id().await }, 5).await?;
+            let chain_id = retry_with_backoff_no_state(|| async { client.chain_id().await }, 5)
+                .await
+                .map_err(EventProcessorError::client)?;
 
             // Only fetch tips we actually need for this source
             let have_confirmed = proc_indices
@@ -237,7 +237,8 @@ impl EthWatch {
             let to_block_confirmed = if have_confirmed {
                 Some(
                     retry_with_backoff_no_state(|| async { client.confirmed_block_number().await }, 5)
-                        .await?,
+                        .await
+                        .map_err(EventProcessorError::client)?,
                 )
             } else {
                 None
@@ -245,7 +246,8 @@ impl EthWatch {
             let to_block_finalized = if have_finalized {
                 Some(
                     retry_with_backoff_no_state(|| async { client.finalized_block_number().await }, 5)
-                        .await?,
+                        .await
+                        .map_err(EventProcessorError::client)?,
                 )
             } else {
                 None
@@ -282,7 +284,8 @@ impl EthWatch {
                             to_block.saturating_sub(self.event_expiration_blocks),
                         )
                         .await
-                        .map_err(DalError::generalize)?;
+                        .map_err(DalError::generalize)
+                        .map_err(EventProcessorError::internal)?;
                     if cursor > to_block {
                         continue;
                     }
@@ -350,7 +353,7 @@ impl EthWatch {
                             5,
                         )
                         .await
-                        .map_err(EventProcessorError::from)?;
+                        .map_err(EventProcessorError::client)?;
 
                         logs.sort_by(|a, b| {
                             let abn = a.block_number.unwrap_or_default();
@@ -405,7 +408,8 @@ impl EthWatch {
                                     next_block_to_process,
                                 )
                                 .await
-                                .map_err(DalError::generalize)?;
+                                .map_err(DalError::generalize)
+                                .map_err(EventProcessorError::internal)?;
 
                             // Update local state; avoid no-progress
                             let s: &mut PState = &mut states[st_i];
