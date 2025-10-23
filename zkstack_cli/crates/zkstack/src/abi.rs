@@ -34,9 +34,16 @@ abigen!(
 ]"
 );
 
+// "validators" is from pre-v29, used for backward compatibility. Will be removed once v29 is released.
 abigen!(
     ValidatorTimelockAbi,
     r"[
+    function hasRole(uint256 _chainId, bytes32 _role, address _account)(bool)
+    function hasRoleForChainId(uint256 _chainId, bytes32 _role, address _account)(bool)
+    function PRECOMMITTER_ROLE()(bytes32)
+    function COMMITTER_ROLE()(bytes32)
+    function PROVER_ROLE()(bytes32)
+    function EXECUTOR_ROLE()(bytes32)
     function validators(uint256 _chainId, address _validator)(bool)
-]"
+    ]"
 );

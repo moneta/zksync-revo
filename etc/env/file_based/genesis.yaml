@@ -1,16 +1,17 @@
+genesis_protocol_semantic_version: 0.29.0
+genesis_protocol_version: null
 genesis_root: 0x3651eb114fd78a0f557a71640ce9116db240b4bb56eb08d639e7e01e7b3db570
-genesis_rollup_leaf_index: 80
+genesis_rollup_leaf_index: 85
 genesis_batch_commitment: 0xa2ef603b714f460a1a2776d1127c405b8dd7f5abb3d8e8bcb894acadacbfe5aa
-genesis_protocol_version: 28
+
 default_aa_hash: 0x010005f76684e35d6735e197d3364f3e5fc08182f1e408ecd62abdddf7dd3143
 bootloader_hash: 0x01000873ca1483c394cef963075fca3b3231f051ab3a05ddf48db58c0b7ac990
 l1_chain_id: 9
 l2_chain_id: 270
 fee_account: '0x0000000000000000000000000000000000000001'
+l1_batch_commit_data_generator_mode: Rollup
 prover:
-  dummy_verifier: true
   snark_wrapper_vk_hash: 0xd90459c5b727b9ceeb2b6192d2953dbf05970edf090333b3ad3bcac1a1442b78
   fflonk_snark_wrapper_vk_hash: 0x17e8d7931f1314431359233e65c22657a32c335205e3c24ce292c5819becfaa7
-genesis_protocol_semantic_version: 0.28.0
-evm_emulator_hash: 0x01000d83e0329d9144ad041430fafcbc2b388e5434db8cb8a96e80157738a1da
-l1_batch_commit_data_generator_mode: Rollup
+  dummy_verifier: true
+custom_genesis_state_path: null
