@@ -65,6 +65,8 @@ pub struct MulticallData {
     pub stm_validator_timelock_address: Address,
     pub stm_protocol_version_id: ProtocolVersionId,
     pub da_validator_pair: DAValidatorPair,
+    /// Execution delay in seconds from the ValidatorTimelock contract
+    pub execution_delay: Duration,
 }
 
 /// The component is responsible for aggregating l1 batches into eth_txs.
@@ -270,17 +272,17 @@ impl EthTxAggregator {
             calldata: get_stm_protocol_version_input,
         };
 
-        let get_stm_validator_timelock_input = self
+        let get_stm_pre_v29_validator_timelock_input = self
             .functions
             .state_transition_manager_contract
             .function("validatorTimelock")
             .unwrap()
             .encode_input(&[])
             .unwrap();
-        let get_stm_validator_timelock_call = Multicall3Call {
+        let get_stm_pre_v29_validator_timelock_call = Multicall3Call {
             target: self.state_transition_manager_address,
             allow_failure: ALLOW_FAILURE,
-            calldata: get_stm_validator_timelock_input,
+            calldata: get_stm_pre_v29_validator_timelock_input,
         };
 
         let get_da_validator_pair_input = self
@@ -295,6 +297,35 @@ impl EthTxAggregator {
             calldata: get_da_validator_pair_input,
         };
 
+        // Get execution delay from ValidatorTimelock contract
+        let get_execution_delay_input = self
+            .functions
+            .validator_timelock_contract
+            .function("executionDelay")
+            .unwrap()
+            .encode_input(&[])
+            .unwrap();
+        let get_execution_delay_call = Multicall3Call {
+            target: self.config_timelock_contract_address,
+            allow_failure: ALLOW_FAILURE,
+            calldata: get_execution_delay_input,
+        };
+
+        let get_post_v29_upgradeable_validator_timelock_input = self
+            .functions
+            .state_transition_manager_contract
+            .function("validatorTimelockPostV29")
+            .unwrap()
+            .encode_input(&[])
+            .unwrap();
+
+        let get_post_v29_upgradeable_validator_timelock_call = Multicall3Call {
+            target: self.state_transition_manager_address,
+            // Note, that this call is allowed to fail, as the corresponding function is not present in the pre-v29 protocol versions
+            allow_failure: true,
+            calldata: get_post_v29_upgradeable_validator_timelock_input,
+        };
+
         let mut token_vec = vec![
             get_bootloader_hash_call.into_token(),
             get_default_aa_hash_call.into_token(),
@@ -302,8 +333,10 @@ impl EthTxAggregator {
             get_verifier_call.into_token(),
             get_protocol_version_call.into_token(),
             get_stm_protocol_version_call.into_token(),
-            get_stm_validator_timelock_call.into_token(),
+            get_stm_pre_v29_validator_timelock_call.into_token(),
             get_da_validator_pair_call.into_token(),
+            get_execution_delay_call.into_token(),
+            get_post_v29_upgradeable_validator_timelock_call.into_token(),
         ];
 
         let mut evm_emulator_hash_requested = false;
@@ -339,8 +372,8 @@ impl EthTxAggregator {
         };
 
         if let Token::Array(call_results) = token {
-            let number_of_calls = if evm_emulator_hash_requested { 9 } else { 8 };
-            // 8 or 9 calls are aggregated in multicall
+            let number_of_calls = if evm_emulator_hash_requested { 11 } else { 10 };
+            // 10 or 11 calls are aggregated in multicall (added execution delay call and post-v29 validator timelock call)
             if call_results.len() != number_of_calls {
                 return parse_error(&call_results);
             }
@@ -417,6 +450,24 @@ impl EthTxAggregator {
                 "contract DA validator pair",
             )?;
 
+            let execution_delay = Self::parse_execution_delay(
+                call_results_iterator.next().unwrap(),
+                "execution delay",
+            )?;
+
+            let stm_validator_timelock_address =
+                if chain_protocol_version_id.is_pre_interop_fast_blocks() {
+                    // We just skip the result for the pre-V29 upgradeable validator timelock
+                    call_results_iterator.next().unwrap();
+
+                    stm_validator_timelock_address
+                } else {
+                    Self::parse_address(
+                        call_results_iterator.next().unwrap(),
+                        "post-V29 upgradeable validator timelock",
+                    )?
+                };
+
             return Ok(MulticallData {
                 base_system_contracts_hashes,
                 verifier_address,
@@ -424,6 +475,7 @@ impl EthTxAggregator {
                 stm_protocol_version_id,
                 stm_validator_timelock_address,
                 da_validator_pair,
+                execution_delay,
             });
         }
         parse_error(&[token])
@@ -456,7 +508,13 @@ impl EthTxAggregator {
     }
 
     fn parse_address(data: Token, name: &'static str) -> Result<Address, EthSenderError> {
-        let multicall_data = Multicall3Result::from_token(data)?.return_data;
+        let result = Multicall3Result::from_token(data)?;
+        if !result.success {
+            return Err(EthSenderError::Parse(Web3ContractError::InvalidOutputType(
+                format!("multicall3 {name} call failed"),
+            )));
+        }
+        let multicall_data = result.return_data;
         if multicall_data.len() != 32 {
             return Err(EthSenderError::Parse(Web3ContractError::InvalidOutputType(
                 format!(
@@ -494,6 +552,21 @@ impl EthTxAggregator {
         };
 
         Ok(pair)
+    }
+
+    fn parse_execution_delay(data: Token, name: &'static str) -> Result<Duration, EthSenderError> {
+        let multicall_data = Multicall3Result::from_token(data)?.return_data;
+        if multicall_data.len() != 32 {
+            return Err(EthSenderError::Parse(Web3ContractError::InvalidOutputType(
+                format!(
+                    "multicall3 {name} data is not of the len of 32: {:?}",
+                    multicall_data
+                ),
+            )));
+        }
+
+        let delay_seconds = U256::from_big_endian(&multicall_data);
+        Ok(Duration::from_secs(delay_seconds.as_u64()))
     }
 
     fn timelock_contract_address(
@@ -597,6 +670,7 @@ impl EthTxAggregator {
             stm_protocol_version_id,
             stm_validator_timelock_address,
             da_validator_pair,
+            execution_delay,
         } = retry_with_backoff(self, |s| {
             Box::pin(async move { s.get_multicall_data().await })
         }, 5).await?;
@@ -698,6 +772,7 @@ impl EthTxAggregator {
                 op_restrictions,
                 priority_tree_start_index,
                 precommit_params.as_ref(),
+                execution_delay,
             )
             .await?
         {
@@ -1174,7 +1249,7 @@ impl EthTxAggregator {
             .await?;
 
         if latest_processed_l1_batch_number.is_none() {
-            return Ok(true);
+            return Ok(false);
         }
 
         let last_sent_successfully_eth_tx = storage
