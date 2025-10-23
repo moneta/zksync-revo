@@ -23,10 +23,6 @@ use self::{
     },
     metrics::METRICS,
 };
-use crate::event_processors::{
-    BatchRootProcessor, DecentralizedUpgradesEventProcessor, EventsSource,
-    GatewayMigrationProcessor,
-};
 
 use zksync_utils::retry::retry_with_backoff_no_state;
 use rand::Rng;
