@@ -247,6 +247,7 @@ pub(super) const MSG_INITIALIZING_PROVER_DATABASE: &str = "Initializing prover d
 pub(super) const MSG_FAILED_TO_DROP_PROVER_DATABASE_ERR: &str = "Failed to drop prover database";
 pub(super) const MSG_GENESIS_DATABASES_INITIALIZED: &str = "Databases initialized successfully";
 pub(super) const MSG_BRIDGEHUB: &str = "Bridgehub address of existing ecosystem";
+pub(super) const MSG_CTM: &str = "Chain type manager address that has to be registered";
 
 /// Chain update related messages
 pub(super) const MSG_WALLETS_CONFIG_MUST_BE_PRESENT: &str = "Wallets configuration must be present";
@@ -662,3 +663,5 @@ pub(super) const MSG_AVAIL_BRIDGE_API_URL_PROMPT: &str = "Attestation bridge API
 pub(super) const MSG_AVAIL_SEED_PHRASE_PROMPT: &str = "Seed phrase";
 pub(super) const MSG_AVAIL_GAS_RELAY_API_KEY_PROMPT: &str = "Gas relay API key";
 pub(super) const MSG_INVALID_URL_ERR: &str = "Invalid URL format";
+pub(super) const MSG_ZKSYNC_OS: &str = "Deploy CTM for zksync os flag";
+pub(super) const MSG_NO_GENESIS: &str = "Do not run genesis";
