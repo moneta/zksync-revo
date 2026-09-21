@@ -13,6 +13,7 @@ ENV SCCACHE_GCS_BUCKET=${SCCACHE_GCS_BUCKET}
 ENV SCCACHE_GCS_SERVICE_ACCOUNT=${SCCACHE_GCS_SERVICE_ACCOUNT}
 ENV SCCACHE_GCS_RW_MODE=${SCCACHE_GCS_RW_MODE}
 ENV RUSTC_WRAPPER=${RUSTC_WRAPPER}
+ENV RUSTUP_USE_IPV4=1
 
 WORKDIR /usr/src/zksync
 COPY . .
@@ -22,7 +23,10 @@ RUN cargo build --manifest-path ./core/Cargo.toml --release --bin zksync_contrac
 FROM ghcr.io/matter-labs/zksync-runtime-base:latest
 
 RUN apt-get update && apt-get install -y wget python3 jq && rm -rf /var/lib/apt/lists/*
-
+# RUN apt-get update && apt-get install -y curl build-essential \
+#     && curl https://sh.rustup.rs -sSf | sh -s -- -y \
+#     && rustup update nightly
+    
 # install zksolc 1.3.x
 RUN skip_versions="v1.3.12 v1.3.15 v1.3.20" && \
     for VERSION in $(seq -f "v1.3.%g" 0 23); do \

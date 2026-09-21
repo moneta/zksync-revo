@@ -8305,8 +8305,10 @@ version = "29.5.0-non-semver-compat"
 dependencies = [
  "anyhow",
  "once_cell",
+ "rand 0.8.5",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -8316,6 +8318,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures",
+ "http 1.1.0",
  "jsonrpsee",
  "pin-project-lite",
  "rlp",

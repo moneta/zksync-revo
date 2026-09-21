@@ -23,7 +23,7 @@ RUN cd prover && cargo build --release --bin zksync_witness_generator
 
 FROM ghcr.io/matter-labs/zksync-runtime-base:latest
 
-COPY prover/data/keys/ /prover/data/keys/
+# COPY prover/data/keys/ /prover/data/keys/
 
 COPY --from=builder /usr/src/zksync/prover/target/release/zksync_witness_generator /usr/bin/
 

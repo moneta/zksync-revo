@@ -122,7 +122,7 @@ impl WiringLayer for MockL1ClientLayer {
 
     fn layer_name(&self) -> &'static str {
         // We don't care about values, we just want to hijack the layer name.
-        QueryEthClientLayer::new(L1ChainId(1), "https://example.com".parse().unwrap()).layer_name()
+        QueryEthClientLayer::new(L1ChainId(1), "https://example.com".parse().unwrap(), None).layer_name()
     }
 
     async fn wire(self, (): Self::Input) -> Result<Self::Output, WiringError> {

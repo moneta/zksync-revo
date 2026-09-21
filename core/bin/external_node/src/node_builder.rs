@@ -169,6 +169,7 @@ impl ExternalNodeBuilder {
                 .l1_rpc_url
                 .clone()
                 .context("missing L1 RPC URL")?,
+            self.config.local.secrets.l1.google_api_key.clone(),
         );
         self.node.add_layer(query_eth_client_layer);
         Ok(self)

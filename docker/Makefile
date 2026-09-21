@@ -76,26 +76,55 @@ prepare-keys:
 	curl -LO https://storage.googleapis.com/matterlabs-setup-keys-us/setup-keys/setup_2\^26.key
 
 # Targets for building each container
+# build-contract-verifier: check-tools prepare-contracts prepare-keys
+# 	$(DOCKER_BUILD_CMD) --file contract-verifier/Dockerfile --load \
+# 		--tag contract-verifier:$(PROTOCOL_VERSION) $(CONTEXT)
 build-contract-verifier: check-tools prepare-contracts prepare-keys
-	$(DOCKER_BUILD_CMD) --file contract-verifier/Dockerfile --load \
-		--tag contract-verifier:$(PROTOCOL_VERSION) $(CONTEXT)
+	$(DOCKER_BUILD_CMD) --network=host --push --file contract-verifier/Dockerfile --load \
+		--tag ndau/contract-verifier:beta-0.29.2 $(CONTEXT)
 
+# build-server-v2: check-tools prepare-contracts prepare-keys
+# 	$(DOCKER_BUILD_CMD) --file server-v2/Dockerfile --load \
+# 		--tag server-v2:$(PROTOCOL_VERSION) $(CONTEXT)
 build-server-v2: check-tools prepare-contracts prepare-keys
-	$(DOCKER_BUILD_CMD) --file server-v2/Dockerfile --load \
-		--tag server-v2:$(PROTOCOL_VERSION) $(CONTEXT)
+	$(DOCKER_BUILD_CMD) --push --file server-v2/Dockerfile --load \
+		--tag ndau/server-v2:beta-0.29.2 $(CONTEXT)
 
+# build-circuit-prover-gpu: check-tools prepare-keys
+# 	$(DOCKER_BUILD_CMD) --file circuit-prover-gpu/Dockerfile --load \
+# 		--platform linux/amd64 \
+# 		--tag prover:$(PROTOCOL_VERSION) $(CONTEXT)
 build-circuit-prover-gpu: check-tools prepare-keys
-	$(DOCKER_BUILD_CMD) --file circuit-prover-gpu/Dockerfile --load \
+	$(DOCKER_BUILD_CMD) --push --file circuit-prover-gpu/Dockerfile --load \
 		--platform linux/amd64 \
-		--tag prover:$(PROTOCOL_VERSION) $(CONTEXT)
+		--tag ndau/prover:beta-0.29.2 $(CONTEXT)
 
+build-prover_fri_gateway: check-tools prepare-keys
+	$(DOCKER_BUILD_CMD) --push --file prover-fri-gateway/Dockerfile --load \
+		--platform linux/amd64 \
+		--tag ndau/prover-fri-gateway:beta-0.29.2 $(CONTEXT)
+
+# build-witness-generator: check-tools prepare-keys
+# 	$(DOCKER_BUILD_CMD) --file witness-generator/Dockerfile --load \
+# 		--tag witness-generator:$(PROTOCOL_VERSION) $(CONTEXT)
 build-witness-generator: check-tools prepare-keys
-	$(DOCKER_BUILD_CMD) --file witness-generator/Dockerfile --load \
-		--tag witness-generator:$(PROTOCOL_VERSION) $(CONTEXT)
+	$(DOCKER_BUILD_CMD) --push --file witness-generator/Dockerfile --load \
+	  --platform linux/amd64 \
+		--tag ndau/witness-generator:beta-0.29.2  $(CONTEXT)
+
+build-prover-job-monitor: check-tools prepare-keys
+	$(DOCKER_BUILD_CMD) --push  --file prover-job-monitor/Dockerfile --load \
+		--tag ndau/prover-job-monitor:beta-0.29.2 $(CONTEXT)
 
 build-external-node: check-tools prepare-contracts
-	$(DOCKER_BUILD_CMD) --file external-node/Dockerfile --load \
-		--tag external-node:$(PROTOCOL_VERSION) $(CONTEXT)
+	$(DOCKER_BUILD_CMD) --push  --network=host --file external-node/Dockerfile --load \
+		--tag ndau/external-node:beta-0.29.2 $(CONTEXT)
+
+
+build-external-node-arm: check-tools prepare-contracts
+	$(DOCKER_BUILD_CMD) --push  --network=host --file external-node/Dockerfile --load \
+		--platform linux/arm64 \
+		--tag ndau/external-node:arm-beta-0.29.2 $(CONTEXT)
 
 # Build all containers
 build-all: build-contract-verifier build-server-v2 build-witness-generator build-circuit-prover-gpu build-external-node cleanup
