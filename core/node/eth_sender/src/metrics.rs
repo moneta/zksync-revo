@@ -158,6 +158,15 @@ pub(super) struct EthSenderMetrics {
     /// Number of L1 batches aggregated for publishing with a specific reason.
     pub block_aggregation_reason: Family<AggregationReasonLabels, Counter>,
     pub l1_transient_errors: Counter,
+    /// Rows returned per call to `get_non_final_txs`/`get_inflight_txs` (unbounded today; see OOM plan).
+    #[metrics(buckets = Buckets::exponential(1.0..=10_000.0, 2.0))]
+    pub unconfirmed_txs_scanned: Histogram<usize>,
+    /// Resend-attempt rows returned per call to `get_tx_history_to_check` for a single eth_tx.
+    #[metrics(buckets = Buckets::exponential(1.0..=10_000.0, 2.0))]
+    pub tx_history_attempts_scanned: Histogram<usize>,
+    /// Approx bytes (`signed_raw_tx` + duplicated `blob_sidecar`) loaded per `get_tx_history_to_check` call.
+    #[metrics(buckets = Buckets::exponential(1024.0..=1_073_741_824.0, 4.0))]
+    pub tx_history_bytes_scanned: Histogram<usize>,
 }
 
 impl EthSenderMetrics {

@@ -109,12 +109,22 @@ impl EthTxManager {
         op: &EthTx,
     ) -> Result<Option<ExecutedTxStatus>, EthSenderError> {
         // Checking history items, starting from most recently sent.
-        for history_item in storage
+        let history_to_check = storage
             .eth_sender_dal()
             .get_tx_history_to_check(op.id)
             .await
-            .unwrap()
-        {
+            .unwrap();
+        METRICS
+            .tx_history_attempts_scanned
+            .observe(history_to_check.len());
+        // Approximates bytes loaded per call; see the OOM investigation plan for why this is tracked.
+        METRICS.tx_history_bytes_scanned.observe(
+            history_to_check
+                .iter()
+                .map(|h| h.signed_raw_tx.len())
+                .sum(),
+        );
+        for history_item in history_to_check {
             // `status` is a Result here and we don't unwrap it with `?`
             // because if we do and get an `Err`, we won't finish the for loop,
             // which means we might miss the transaction that actually succeeded.
@@ -411,6 +421,9 @@ impl EthTxManager {
                 )
                 .await
                 .unwrap();
+            METRICS
+                .unconfirmed_txs_scanned
+                .observe(non_final_txs.len());
 
             let result = self
                 .apply_inflight_txs_statuses_and_get_first_to_resend(
@@ -442,6 +455,7 @@ impl EthTxManager {
                 .await
                 .unwrap();
             METRICS.number_of_inflight_txs[&operator_type].set(inflight_txs.len());
+            METRICS.unconfirmed_txs_scanned.observe(inflight_txs.len());
             Ok(self
                 .apply_inflight_txs_statuses_and_get_first_to_resend(
                     storage,
