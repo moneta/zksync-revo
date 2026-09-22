@@ -103,6 +103,26 @@ pub(super) struct AggregationReasonLabels {
     op: ActionTypeLabel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EncodeLabelValue)]
+#[metrics(rename_all = "snake_case")]
+pub(super) enum TxScanQuery {
+    NonFinal,
+    Inflight,
+    History,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EncodeLabelSet)]
+pub(super) struct TxScanLabels {
+    query: TxScanQuery,
+    operator: OperatorType,
+}
+
+impl From<(TxScanQuery, OperatorType)> for TxScanLabels {
+    fn from((query, operator): (TxScanQuery, OperatorType)) -> Self {
+        Self { query, operator }
+    }
+}
+
 impl From<(L1BatchAggregatedActionType, &'static str)> for AggregationReasonLabels {
     fn from((op, r#type): (L1BatchAggregatedActionType, &'static str)) -> Self {
         Self {
@@ -158,15 +178,12 @@ pub(super) struct EthSenderMetrics {
     /// Number of L1 batches aggregated for publishing with a specific reason.
     pub block_aggregation_reason: Family<AggregationReasonLabels, Counter>,
     pub l1_transient_errors: Counter,
-    /// Rows returned per call to `get_non_final_txs`/`get_inflight_txs` (unbounded today; see OOM plan).
+    /// Rows returned by each transaction status-scan query.
     #[metrics(buckets = Buckets::exponential(1.0..=10_000.0, 2.0))]
-    pub unconfirmed_txs_scanned: Histogram<usize>,
-    /// Resend-attempt rows returned per call to `get_tx_history_to_check` for a single eth_tx.
-    #[metrics(buckets = Buckets::exponential(1.0..=10_000.0, 2.0))]
-    pub tx_history_attempts_scanned: Histogram<usize>,
-    /// Approx bytes (`signed_raw_tx` + duplicated `blob_sidecar`) loaded per `get_tx_history_to_check` call.
+    pub tx_scan_rows: Family<TxScanLabels, Histogram<usize>>,
+    /// Approx transaction payload bytes loaded by each status-scan query.
     #[metrics(buckets = Buckets::exponential(1024.0..=1_073_741_824.0, 4.0))]
-    pub tx_history_bytes_scanned: Histogram<usize>,
+    pub tx_scan_payload_bytes: Family<TxScanLabels, Histogram<usize>>,
 }
 
 impl EthSenderMetrics {

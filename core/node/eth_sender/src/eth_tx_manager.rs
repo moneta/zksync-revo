@@ -15,7 +15,7 @@ use zksync_node_fee_model::l1_gas_price::TxParamsProvider;
 use zksync_shared_metrics::L1Stage;
 use zksync_types::{
     aggregated_operations::{AggregatedActionType, L1BatchAggregatedActionType},
-    eth_sender::{EthTx, EthTxFinalityStatus, L1BlockNumbers},
+    eth_sender::{EthTx, EthTxBlobSidecar, EthTxFinalityStatus, L1BlockNumbers},
     Address, L1BlockNumber, GATEWAY_CALLDATA_PROCESSING_ROLLUP_OVERHEAD_GAS, H256,
     L1_CALLDATA_PROCESSING_ROLLUP_OVERHEAD_GAS, L1_GAS_PER_PUBDATA_BYTE, U256,
 };
@@ -25,7 +25,7 @@ use crate::{
     abstract_l1_interface::{AbstractL1Interface, OperatorNonce, OperatorType, RealL1Interface},
     eth_fees_oracle::{EthFees, EthFeesOracle, GasAdjusterFeesOracle},
     health::{EthTxDetails, EthTxManagerHealthDetails},
-    metrics::TransactionType,
+    metrics::{TransactionType, TxScanQuery},
 };
 use rand::Rng;
 
@@ -114,16 +114,17 @@ impl EthTxManager {
             .get_tx_history_to_check(op.id)
             .await
             .unwrap();
-        METRICS
-            .tx_history_attempts_scanned
-            .observe(history_to_check.len());
-        // Approximates bytes loaded per call; see the OOM investigation plan for why this is tracked.
-        METRICS.tx_history_bytes_scanned.observe(
-            history_to_check
-                .iter()
-                .map(|h| h.signed_raw_tx.len())
-                .sum(),
-        );
+        let operator_type = self.operator_type(op);
+        let labels = (TxScanQuery::History, operator_type).into();
+        METRICS.tx_scan_rows[&labels].observe(history_to_check.len());
+        let signed_tx_bytes: usize = history_to_check
+            .iter()
+            .map(|history| history.signed_raw_tx.len())
+            .sum();
+        let duplicated_sidecar_bytes = blob_sidecar_payload_len(op)
+            .saturating_mul(history_to_check.len());
+        METRICS.tx_scan_payload_bytes[&labels]
+            .observe(signed_tx_bytes.saturating_add(duplicated_sidecar_bytes));
         for history_item in history_to_check {
             // `status` is a Result here and we don't unwrap it with `?`
             // because if we do and get an `Err`, we won't finish the for loop,
@@ -421,9 +422,7 @@ impl EthTxManager {
                 )
                 .await
                 .unwrap();
-            METRICS
-                .unconfirmed_txs_scanned
-                .observe(non_final_txs.len());
+            observe_tx_scan(TxScanQuery::NonFinal, operator_type, &non_final_txs);
 
             let result = self
                 .apply_inflight_txs_statuses_and_get_first_to_resend(
@@ -455,7 +454,7 @@ impl EthTxManager {
                 .await
                 .unwrap();
             METRICS.number_of_inflight_txs[&operator_type].set(inflight_txs.len());
-            METRICS.unconfirmed_txs_scanned.observe(inflight_txs.len());
+            observe_tx_scan(TxScanQuery::Inflight, operator_type, &inflight_txs);
             Ok(self
                 .apply_inflight_txs_statuses_and_get_first_to_resend(
                     storage,
@@ -1058,6 +1057,42 @@ impl EthTxManager {
     /// Returns the health check for eth tx manager.
     pub fn health_check(&self) -> ReactiveHealthCheck {
         self.health_updater.subscribe()
+    }
+}
+
+fn observe_tx_scan(query: TxScanQuery, operator_type: OperatorType, txs: &[EthTx]) {
+    let labels = (query, operator_type).into();
+    METRICS.tx_scan_rows[&labels].observe(txs.len());
+    let payload_bytes = txs
+        .iter()
+        .map(|tx| tx.raw_tx.len().saturating_add(blob_sidecar_payload_len(tx)))
+        .sum();
+    METRICS.tx_scan_payload_bytes[&labels].observe(payload_bytes);
+}
+
+fn blob_sidecar_payload_len(tx: &EthTx) -> usize {
+    match &tx.blob_sidecar {
+        Some(EthTxBlobSidecar::EthTxBlobSidecarV1(sidecar)) => sidecar
+            .blobs
+            .iter()
+            .map(|blob| {
+                blob.blob.len()
+                    + blob.commitment.len()
+                    + blob.proof.len()
+                    + blob.versioned_hash.len()
+            })
+            .sum(),
+        Some(EthTxBlobSidecar::EthTxBlobSidecarV2(sidecar)) => sidecar
+            .blobs
+            .iter()
+            .map(|blob| {
+                blob.blob.len()
+                    + blob.commitment.len()
+                    + blob.versioned_hash.len()
+                    + blob.cell_proofs.iter().map(Vec::len).sum::<usize>()
+            })
+            .sum(),
+        None => 0,
     }
 }
 
