@@ -109,13 +109,26 @@ impl EthTxManager {
         op: &EthTx,
     ) -> Result<Option<ExecutedTxStatus>, EthSenderError> {
         // Checking history items, starting from most recently sent.
+        let operator_type = self.operator_type(op);
+        let labels = (TxScanQuery::History, operator_type).into();
+        let expected_rows = storage
+            .eth_sender_dal()
+            .get_tx_history_to_check_count(op.id)
+            .await
+            .unwrap();
+        METRICS.tx_scan_expected_rows[&labels].set(expected_rows);
+        tracing::info!(
+            ?operator_type,
+            query = "history",
+            expected_rows,
+            eth_tx_id = op.id,
+            "Starting eth tx status scan"
+        );
         let history_to_check = storage
             .eth_sender_dal()
             .get_tx_history_to_check(op.id)
             .await
             .unwrap();
-        let operator_type = self.operator_type(op);
-        let labels = (TxScanQuery::History, operator_type).into();
         METRICS.tx_scan_rows[&labels].observe(history_to_check.len());
         let signed_tx_bytes: usize = history_to_check
             .iter()
@@ -125,6 +138,12 @@ impl EthTxManager {
             .saturating_mul(history_to_check.len());
         METRICS.tx_scan_payload_bytes[&labels]
             .observe(signed_tx_bytes.saturating_add(duplicated_sidecar_bytes));
+        tracing::info!(
+            ?operator_type,
+            query = "history",
+            rows = history_to_check.len(),
+            "Finished eth tx status scan"
+        );
         for history_item in history_to_check {
             // `status` is a Result here and we don't unwrap it with `?`
             // because if we do and get an `Err`, we won't finish the for loop,
@@ -414,15 +433,34 @@ impl EthTxManager {
             .await?;
 
         if let Some(operator_nonce) = operator_nonce {
+            let operator_address = self.operator_address(operator_type);
+            let is_gateway = operator_type == OperatorType::Gateway;
+            let non_final_labels = (TxScanQuery::NonFinal, operator_type).into();
+            let expected_non_final_rows = storage
+                .eth_sender_dal()
+                .get_non_final_txs_count(operator_address, is_gateway)
+                .await
+                .unwrap();
+            METRICS.tx_scan_expected_rows[&non_final_labels]
+                .set(expected_non_final_rows);
+            tracing::info!(
+                ?operator_type,
+                query = "non_final",
+                expected_rows = expected_non_final_rows,
+                "Starting eth tx status scan"
+            );
             let non_final_txs = storage
                 .eth_sender_dal()
-                .get_non_final_txs(
-                    self.operator_address(operator_type),
-                    operator_type == OperatorType::Gateway,
-                )
+                .get_non_final_txs(operator_address, is_gateway)
                 .await
                 .unwrap();
             observe_tx_scan(TxScanQuery::NonFinal, operator_type, &non_final_txs);
+            tracing::info!(
+                ?operator_type,
+                query = "non_final",
+                rows = non_final_txs.len(),
+                "Finished eth tx status scan"
+            );
 
             let result = self
                 .apply_inflight_txs_statuses_and_get_first_to_resend(
@@ -437,24 +475,41 @@ impl EthTxManager {
                 storage
                     .eth_sender_dal()
                     .unfinalize_txs(
-                        self.operator_address(operator_type),
-                        operator_type == OperatorType::Gateway,
+                        operator_address,
+                        is_gateway,
                         eth_tx.id,
                     )
                     .await
                     .unwrap();
             }
 
+            let inflight_labels = (TxScanQuery::Inflight, operator_type).into();
+            let expected_inflight_rows = storage
+                .eth_sender_dal()
+                .get_inflight_txs_count(operator_address, is_gateway)
+                .await
+                .unwrap();
+            METRICS.tx_scan_expected_rows[&inflight_labels]
+                .set(expected_inflight_rows);
+            tracing::info!(
+                ?operator_type,
+                query = "inflight",
+                expected_rows = expected_inflight_rows,
+                "Starting eth tx status scan"
+            );
             let inflight_txs = storage
                 .eth_sender_dal()
-                .get_inflight_txs(
-                    self.operator_address(operator_type),
-                    operator_type == OperatorType::Gateway,
-                )
+                .get_inflight_txs(operator_address, is_gateway)
                 .await
                 .unwrap();
             METRICS.number_of_inflight_txs[&operator_type].set(inflight_txs.len());
             observe_tx_scan(TxScanQuery::Inflight, operator_type, &inflight_txs);
+            tracing::info!(
+                ?operator_type,
+                query = "inflight",
+                rows = inflight_txs.len(),
+                "Finished eth tx status scan"
+            );
             Ok(self
                 .apply_inflight_txs_statuses_and_get_first_to_resend(
                     storage,

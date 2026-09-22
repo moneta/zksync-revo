@@ -25,6 +25,29 @@ pub struct EthSenderDal<'a, 'c> {
 }
 
 impl EthSenderDal<'_, '_> {
+    pub async fn get_non_final_txs_count(
+        &mut self,
+        operator_address: Address,
+        is_gateway: bool,
+    ) -> sqlx::Result<usize> {
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM eth_txs
+            JOIN eth_txs_history ON eth_txs.confirmed_eth_tx_history_id = eth_txs_history.id
+            WHERE
+                from_addr = $1
+                AND is_gateway = $2
+                AND eth_txs_history.finality_status != 'finalized'
+            "#,
+        )
+        .bind(operator_address.as_bytes())
+        .bind(is_gateway)
+        .fetch_one(self.storage.conn())
+        .await?;
+        Ok(count.try_into().unwrap())
+    }
+
     pub async fn get_non_final_txs(
         &mut self,
         operator_address: Address,
@@ -140,6 +163,39 @@ impl EthSenderDal<'_, '_> {
         .fetch_all(self.storage.conn())
         .await?;
         Ok(txs.into_iter().map(|tx| tx.into()).collect())
+    }
+
+    pub async fn get_inflight_txs_count(
+        &mut self,
+        operator_address: Address,
+        is_gateway: bool,
+    ) -> sqlx::Result<usize> {
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM eth_txs
+            WHERE
+                from_addr = $1
+                AND is_gateway = $2
+                AND confirmed_eth_tx_history_id IS NULL
+                AND id <= COALESCE(
+                    (SELECT eth_tx_id
+                    FROM eth_txs_history
+                    JOIN eth_txs ON eth_txs.id = eth_txs_history.eth_tx_id
+                    WHERE
+                        eth_txs_history.finality_status != 'finalized'
+                        AND from_addr = $1
+                        AND is_gateway = $2
+                    ORDER BY eth_tx_id DESC LIMIT 1),
+                    0
+                )
+            "#,
+        )
+        .bind(operator_address.as_bytes())
+        .bind(is_gateway)
+        .fetch_one(self.storage.conn())
+        .await?;
+        Ok(count.try_into().unwrap())
     }
 
     pub async fn get_inflight_txs_count_for_gateway_migration(
@@ -1014,6 +1070,19 @@ impl EthSenderDal<'_, '_> {
         .fetch_all(self.storage.conn())
         .await?;
         Ok(tx_history.into_iter().map(|tx| tx.into()).collect())
+    }
+
+    pub async fn get_tx_history_to_check_count(
+        &mut self,
+        eth_tx_id: u32,
+    ) -> sqlx::Result<usize> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM eth_txs_history WHERE eth_tx_id = $1",
+        )
+        .bind(eth_tx_id as i32)
+        .fetch_one(self.storage.conn())
+        .await?;
+        Ok(count.try_into().unwrap())
     }
 
     pub async fn get_block_number_on_first_sent_attempt(

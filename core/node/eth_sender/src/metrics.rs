@@ -181,6 +181,8 @@ pub(super) struct EthSenderMetrics {
     /// Rows returned by each transaction status-scan query.
     #[metrics(buckets = Buckets::exponential(1.0..=10_000.0, 2.0))]
     pub tx_scan_rows: Family<TxScanLabels, Histogram<usize>>,
+    /// Rows expected before materializing each transaction status-scan query.
+    pub tx_scan_expected_rows: Family<TxScanLabels, Gauge<usize>>,
     /// Approx transaction payload bytes loaded by each status-scan query.
     #[metrics(buckets = Buckets::exponential(1024.0..=1_073_741_824.0, 4.0))]
     pub tx_scan_payload_bytes: Family<TxScanLabels, Histogram<usize>>,
