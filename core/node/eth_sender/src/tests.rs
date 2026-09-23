@@ -32,6 +32,7 @@ use zksync_web3_decl::client::MockClient;
 use crate::{
     abstract_l1_interface::{AbstractL1Interface, OperatorType, RealL1Interface},
     aggregated_operations::{AggregatedOperation, L1BatchAggregatedOperation},
+    eth_tx_manager::InflightTxsOutcome,
     tester::{
         EthSenderTester, TestL1Batch, STATE_TRANSITION_CONTRACT_ADDRESS,
         STATE_TRANSITION_MANAGER_CONTRACT_ADDRESS,
@@ -303,7 +304,9 @@ async fn resend_each_block(commitment_mode: L1BatchCommitmentMode) -> anyhow::Re
             .eth_sender_dal()
             .get_inflight_txs(
                 tester.manager.operator_address(OperatorType::NonBlob),
-                false
+                false,
+                None,
+                u64::MAX,
             )
             .await
             .unwrap()
@@ -332,7 +335,7 @@ async fn resend_each_block(commitment_mode: L1BatchCommitmentMode) -> anyhow::Re
     tester.gas_adjuster.keep_updated().await?;
     let block_numbers = tester.get_block_numbers().await;
 
-    let (to_resend, _) = tester
+    let InflightTxsOutcome::Resend(to_resend, _) = tester
         .manager
         .monitor_inflight_transactions_single_operator(
             &mut tester.conn.connection().await.unwrap(),
@@ -340,7 +343,9 @@ async fn resend_each_block(commitment_mode: L1BatchCommitmentMode) -> anyhow::Re
             OperatorType::NonBlob,
         )
         .await?
-        .unwrap();
+    else {
+        panic!("expected transaction to resend");
+    };
 
     let resent_hash = tester
         .manager
@@ -361,7 +366,9 @@ async fn resend_each_block(commitment_mode: L1BatchCommitmentMode) -> anyhow::Re
             .eth_sender_dal()
             .get_inflight_txs(
                 tester.manager.operator_address(OperatorType::NonBlob),
-                false
+                false,
+                None,
+                u64::MAX,
             )
             .await
             .unwrap()
@@ -1107,9 +1114,34 @@ async fn manager_monitors_even_unsuccesfully_sent_txs() {
         .await
         .unwrap();
     assert_eq!(all_attempts.len(), 1);
+    let mined_hash = all_attempts[0].tx_hash;
+    for value in 1..=10 {
+        conn.eth_sender_dal()
+            .insert_tx_history(
+                1,
+                value,
+                value,
+                None,
+                None,
+                H256::from_low_u64_be(value),
+                &[value as u8],
+                value as u32,
+                None,
+            )
+            .await
+            .unwrap();
+    }
 
-    // Mark tx as successful on SL side and run eth tx manager iteration.
-    tester.confirm_tx(all_attempts[0].tx_hash, true).await;
+    // Mark the oldest attempt as successful. The first manager iteration checks
+    // only the 10 newer attempts, and the second one resumes at the oldest.
+    tester.confirm_tx(mined_hash, true).await;
+    assert!(conn
+        .eth_sender_dal()
+        .get_confirmed_tx_hash_by_eth_tx_id(1)
+        .await
+        .unwrap()
+        .is_none());
+    tester.run_eth_sender_tx_manager_iteration().await;
 
     // Check that `sent_successfully` was reset to true.
     let tx = conn
@@ -1130,4 +1162,74 @@ async fn manager_monitors_even_unsuccesfully_sent_txs() {
         .unwrap()
         .is_some();
     assert!(is_confirmed);
+}
+
+#[test_log::test(tokio::test)]
+async fn tx_history_hash_pages_are_complete_and_ordered() {
+    let pool = ConnectionPool::<Core>::test_pool().await;
+    let mut tester = EthSenderTester::new(
+        pool.clone(),
+        vec![100; 100],
+        false,
+        false,
+        L1BatchCommitmentMode::Rollup,
+        SettlementLayer::L1(10.into()),
+    )
+    .await;
+
+    let _genesis_batch = TestL1Batch::sealed(&mut tester).await;
+    let l1_batch = TestL1Batch::sealed(&mut tester).await;
+    let eth_tx = tester.save_commit_tx(l1_batch.number).await;
+    let mut conn = pool.connection().await.unwrap();
+    for value in 1..=5 {
+        conn.eth_sender_dal()
+            .insert_tx_history(
+                eth_tx.id,
+                value,
+                value,
+                None,
+                None,
+                H256::from_low_u64_be(value),
+                &[value as u8],
+                value as u32,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
+    let first_page = conn
+        .eth_sender_dal()
+        .get_tx_history_hashes_to_check(eth_tx.id, None, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        first_page.iter().map(|row| row.tx_hash).collect::<Vec<_>>(),
+        [H256::from_low_u64_be(5), H256::from_low_u64_be(4)]
+    );
+
+    let second_page = conn
+        .eth_sender_dal()
+        .get_tx_history_hashes_to_check(eth_tx.id, Some(first_page[1].id), 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        second_page.iter().map(|row| row.tx_hash).collect::<Vec<_>>(),
+        [H256::from_low_u64_be(3), H256::from_low_u64_be(2)]
+    );
+
+    let final_page = conn
+        .eth_sender_dal()
+        .get_tx_history_hashes_to_check(eth_tx.id, Some(second_page[1].id), 2)
+        .await
+        .unwrap();
+    assert_eq!(final_page.len(), 1);
+    assert_eq!(final_page[0].tx_hash, H256::from_low_u64_be(1));
+
+    let exhausted = conn
+        .eth_sender_dal()
+        .get_tx_history_hashes_to_check(eth_tx.id, Some(final_page[0].id), 2)
+        .await
+        .unwrap();
+    assert!(exhausted.is_empty());
 }

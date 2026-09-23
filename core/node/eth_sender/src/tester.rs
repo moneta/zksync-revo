@@ -490,9 +490,14 @@ impl EthSenderTester {
         let tx_sent_before = self.gateway.sent_tx_count()
             + self.gateway_blobs.sent_tx_count()
             + self.l2_gateway.sent_tx_count();
+        let l1_block_numbers = self.get_block_numbers().await;
         self.manager
-            .loop_iteration(&mut self.conn.connection().await.unwrap())
-            .await;
+            .loop_iteration(
+                &mut self.conn.connection().await.unwrap(),
+                l1_block_numbers,
+            )
+            .await
+            .unwrap();
         self.tx_sent_in_last_iteration_count = (self.gateway.sent_tx_count()
             + self.gateway_blobs.sent_tx_count()
             + self.l2_gateway.sent_tx_count())
@@ -645,7 +650,12 @@ impl EthSenderTester {
             self.storage()
                 .await
                 .eth_sender_dal()
-                .get_non_final_txs(self.manager.operator_address(OperatorType::NonBlob), false)
+                .get_non_final_txs(
+                    self.manager.operator_address(OperatorType::NonBlob),
+                    false,
+                    None,
+                    u64::MAX,
+                )
                 .await
                 .unwrap()
                 .len()
@@ -653,7 +663,12 @@ impl EthSenderTester {
                     .storage()
                     .await
                     .eth_sender_dal()
-                    .get_non_final_txs(self.manager.operator_address(OperatorType::Blob), false)
+                    .get_non_final_txs(
+                        self.manager.operator_address(OperatorType::Blob),
+                        false,
+                        None,
+                        u64::MAX,
+                    )
                     .await
                     .unwrap()
                     .len()
@@ -661,7 +676,12 @@ impl EthSenderTester {
             self.storage()
                 .await
                 .eth_sender_dal()
-                .get_non_final_txs(self.manager.operator_address(OperatorType::Gateway), true)
+                .get_non_final_txs(
+                    self.manager.operator_address(OperatorType::Gateway),
+                    true,
+                    None,
+                    u64::MAX,
+                )
                 .await
                 .unwrap()
                 .len()
@@ -684,7 +704,12 @@ impl EthSenderTester {
             self.storage()
                 .await
                 .eth_sender_dal()
-                .get_inflight_txs(self.manager.operator_address(OperatorType::NonBlob), false)
+                .get_inflight_txs(
+                    self.manager.operator_address(OperatorType::NonBlob),
+                    false,
+                    None,
+                    u64::MAX,
+                )
                 .await
                 .unwrap()
                 .len()
@@ -692,7 +717,12 @@ impl EthSenderTester {
                     .storage()
                     .await
                     .eth_sender_dal()
-                    .get_inflight_txs(self.manager.operator_address(OperatorType::Blob), false)
+                    .get_inflight_txs(
+                        self.manager.operator_address(OperatorType::Blob),
+                        false,
+                        None,
+                        u64::MAX,
+                    )
                     .await
                     .unwrap()
                     .len()
@@ -700,7 +730,12 @@ impl EthSenderTester {
             self.storage()
                 .await
                 .eth_sender_dal()
-                .get_inflight_txs(self.manager.operator_address(OperatorType::Gateway), true)
+                .get_inflight_txs(
+                    self.manager.operator_address(OperatorType::Gateway),
+                    true,
+                    None,
+                    u64::MAX,
+                )
                 .await
                 .unwrap()
                 .len()

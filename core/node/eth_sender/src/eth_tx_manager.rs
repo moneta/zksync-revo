@@ -42,6 +42,26 @@ struct StatusPacing {
     backoff_pow: u8,         // 0..=6 -> stride 1,2,4,8,16,32,64
 }
 
+#[derive(Debug, Clone, Copy)]
+struct HistoryScanCursor {
+    eth_tx_id: u32,
+    before_id: Option<u32>,
+}
+
+#[derive(Debug)]
+enum HistoryCheckOutcome {
+    Found(ExecutedTxStatus),
+    MoreHistory,
+    Exhausted,
+}
+
+#[derive(Debug)]
+pub(super) enum InflightTxsOutcome {
+    Resend(EthTx, u32),
+    MoreHistory,
+    NoAction,
+}
+
 #[derive(Debug)]
 pub struct EthTxManager {
     l1_interface: Box<dyn AbstractL1Interface>,
@@ -49,6 +69,9 @@ pub struct EthTxManager {
     fees_oracle: Box<dyn EthFeesOracle>,
     pool: ConnectionPool<Core>,
     status_pacing: HashMap<OperatorType, StatusPacing>,
+    history_scan_cursors: HashMap<OperatorType, HistoryScanCursor>,
+    non_final_scan_cursors: HashMap<OperatorType, u32>,
+    inflight_scan_cursors: HashMap<OperatorType, u32>,
     health_updater: HealthUpdater,
 }
 
@@ -94,6 +117,9 @@ impl EthTxManager {
             fees_oracle: Box::new(fees_oracle),
             pool,
             status_pacing: Default::default(),
+            history_scan_cursors: Default::default(),
+            non_final_scan_cursors: Default::default(),
+            inflight_scan_cursors: Default::default(),
             health_updater: ReactiveHealthCheck::new("eth_tx_manager").1,
         }
     }
@@ -104,46 +130,68 @@ impl EthTxManager {
     }
 
     async fn check_all_sending_attempts(
-        &self,
+        &mut self,
         storage: &mut Connection<'_, Core>,
         op: &EthTx,
-    ) -> Result<Option<ExecutedTxStatus>, EthSenderError> {
+        operator_type: OperatorType,
+    ) -> Result<HistoryCheckOutcome, EthSenderError> {
         // Checking history items, starting from most recently sent.
-        let operator_type = self.operator_type(op);
         let labels = (TxScanQuery::History, operator_type).into();
-        let expected_rows = storage
-            .eth_sender_dal()
-            .get_tx_history_to_check_count(op.id)
-            .await
-            .unwrap();
-        METRICS.tx_scan_expected_rows[&labels].set(expected_rows);
-        tracing::info!(
-            ?operator_type,
-            query = "history",
-            expected_rows,
-            eth_tx_id = op.id,
-            "Starting eth tx status scan"
-        );
+        let cursor = self.history_scan_cursors.get(&operator_type).copied();
+        let before_id = match cursor {
+            Some(cursor) if cursor.eth_tx_id == op.id => cursor.before_id,
+            _ => {
+                let expected_rows = storage
+                    .eth_sender_dal()
+                    .get_tx_history_to_check_count(op.id)
+                    .await
+                    .unwrap();
+                METRICS.tx_scan_expected_rows[&labels].set(expected_rows);
+                tracing::info!(
+                    ?operator_type,
+                    query = "history",
+                    expected_rows,
+                    eth_tx_id = op.id,
+                    "Starting eth tx status scan"
+                );
+                self.history_scan_cursors.insert(
+                    operator_type,
+                    HistoryScanCursor {
+                        eth_tx_id: op.id,
+                        before_id: None,
+                    },
+                );
+                None
+            }
+        };
+
         let history_to_check = storage
             .eth_sender_dal()
-            .get_tx_history_to_check(op.id)
+            .get_tx_history_hashes_to_check(
+                op.id,
+                before_id,
+                self.config.status_scan_batch_size.get(),
+            )
             .await
             .unwrap();
         METRICS.tx_scan_rows[&labels].observe(history_to_check.len());
-        let signed_tx_bytes: usize = history_to_check
-            .iter()
-            .map(|history| history.signed_raw_tx.len())
-            .sum();
-        let duplicated_sidecar_bytes = blob_sidecar_payload_len(op)
-            .saturating_mul(history_to_check.len());
         METRICS.tx_scan_payload_bytes[&labels]
-            .observe(signed_tx_bytes.saturating_add(duplicated_sidecar_bytes));
+            .observe(history_to_check.len().saturating_mul(std::mem::size_of::<H256>()));
         tracing::info!(
             ?operator_type,
             query = "history",
             rows = history_to_check.len(),
             "Finished eth tx status scan"
         );
+
+        if history_to_check.is_empty() {
+            self.history_scan_cursors.remove(&operator_type);
+            return Ok(HistoryCheckOutcome::Exhausted);
+        }
+
+        let next_before_id = history_to_check.last().unwrap().id;
+        let page_is_full =
+            history_to_check.len() == self.config.status_scan_batch_size.get() as usize;
         for history_item in history_to_check {
             // `status` is a Result here and we don't unwrap it with `?`
             // because if we do and get an `Err`, we won't finish the for loop,
@@ -153,7 +201,10 @@ impl EthTxManager {
                 .get_tx_status(history_item.tx_hash, self.operator_type(op))
                 .await
             {
-                Ok(Some(s)) => return Ok(Some(s)),
+                Ok(Some(status)) => {
+                    self.history_scan_cursors.remove(&operator_type);
+                    return Ok(HistoryCheckOutcome::Found(status));
+                }
                 Ok(_) => continue,
                 Err(err) => {
                     tracing::warn!(
@@ -165,7 +216,19 @@ impl EthTxManager {
                 }
             }
         }
-        Ok(None)
+        if page_is_full {
+            self.history_scan_cursors.insert(
+                operator_type,
+                HistoryScanCursor {
+                    eth_tx_id: op.id,
+                    before_id: Some(next_before_id),
+                },
+            );
+            Ok(HistoryCheckOutcome::MoreHistory)
+        } else {
+            self.history_scan_cursors.remove(&operator_type);
+            Ok(HistoryCheckOutcome::Exhausted)
+        }
     }
 
     pub(crate) async fn send_eth_tx(
@@ -426,7 +489,7 @@ impl EthTxManager {
         storage: &mut Connection<'_, Core>,
         l1_block_numbers: L1BlockNumbers,
         operator_type: OperatorType,
-    ) -> Result<Option<(EthTx, u32)>, EthSenderError> {
+    ) -> Result<InflightTxsOutcome, EthSenderError> {
         let operator_nonce = self
             .l1_interface
             .get_operator_nonce(l1_block_numbers, operator_type)
@@ -435,23 +498,70 @@ impl EthTxManager {
         if let Some(operator_nonce) = operator_nonce {
             let operator_address = self.operator_address(operator_type);
             let is_gateway = operator_type == OperatorType::Gateway;
+            if let Some(cursor) = self.history_scan_cursors.get(&operator_type).copied() {
+                if let Some(tx) = storage
+                    .eth_sender_dal()
+                    .get_eth_tx(cursor.eth_tx_id)
+                    .await
+                    .unwrap()
+                {
+                    let outcome = self
+                        .apply_inflight_txs_statuses_and_get_first_to_resend(
+                            storage,
+                            l1_block_numbers,
+                            operator_nonce,
+                            vec![tx],
+                            operator_type,
+                        )
+                        .await?;
+                    match outcome {
+                        InflightTxsOutcome::Resend(eth_tx, _) => {
+                            tracing::warn!(
+                                "Fast finalized transaction has been reverted {:?}",
+                                &eth_tx
+                            );
+                            storage
+                                .eth_sender_dal()
+                                .unfinalize_txs(operator_address, is_gateway, eth_tx.id)
+                                .await
+                                .unwrap();
+                            self.history_scan_cursors.remove(&operator_type);
+                            self.non_final_scan_cursors.remove(&operator_type);
+                            self.inflight_scan_cursors.remove(&operator_type);
+                        }
+                        InflightTxsOutcome::MoreHistory => {
+                            return Ok(InflightTxsOutcome::MoreHistory);
+                        }
+                        InflightTxsOutcome::NoAction => {}
+                    }
+                }
+                self.history_scan_cursors.remove(&operator_type);
+            }
+
             let non_final_labels = (TxScanQuery::NonFinal, operator_type).into();
-            let expected_non_final_rows = storage
-                .eth_sender_dal()
-                .get_non_final_txs_count(operator_address, is_gateway)
-                .await
-                .unwrap();
-            METRICS.tx_scan_expected_rows[&non_final_labels]
-                .set(expected_non_final_rows);
+            let non_final_cursor = self.non_final_scan_cursors.get(&operator_type).copied();
+            if non_final_cursor.is_none() {
+                let expected_non_final_rows = storage
+                    .eth_sender_dal()
+                    .get_non_final_txs_count(operator_address, is_gateway)
+                    .await
+                    .unwrap();
+                METRICS.tx_scan_expected_rows[&non_final_labels]
+                    .set(expected_non_final_rows);
+            }
             tracing::info!(
                 ?operator_type,
                 query = "non_final",
-                expected_rows = expected_non_final_rows,
                 "Starting eth tx status scan"
             );
             let non_final_txs = storage
                 .eth_sender_dal()
-                .get_non_final_txs(operator_address, is_gateway)
+                .get_non_final_txs(
+                    operator_address,
+                    is_gateway,
+                    non_final_cursor,
+                    self.config.status_scan_batch_size.get(),
+                )
                 .await
                 .unwrap();
             observe_tx_scan(TxScanQuery::NonFinal, operator_type, &non_final_txs);
@@ -461,6 +571,9 @@ impl EthTxManager {
                 rows = non_final_txs.len(),
                 "Finished eth tx status scan"
             );
+            let non_final_page_is_full =
+                non_final_txs.len() == self.config.status_scan_batch_size.get() as usize;
+            let non_final_last_id = non_final_txs.last().map(|tx| tx.id);
 
             let result = self
                 .apply_inflight_txs_statuses_and_get_first_to_resend(
@@ -468,41 +581,60 @@ impl EthTxManager {
                     l1_block_numbers,
                     operator_nonce,
                     non_final_txs,
+                    operator_type,
                 )
                 .await?;
-            if let Some((eth_tx, _)) = result {
-                tracing::warn!("Fast finalized transaction has been reverted {:?}", &eth_tx);
-                storage
-                    .eth_sender_dal()
-                    .unfinalize_txs(
-                        operator_address,
-                        is_gateway,
-                        eth_tx.id,
-                    )
-                    .await
-                    .unwrap();
+            match result {
+                InflightTxsOutcome::Resend(eth_tx, _) => {
+                    tracing::warn!("Fast finalized transaction has been reverted {:?}", &eth_tx);
+                    storage
+                        .eth_sender_dal()
+                        .unfinalize_txs(operator_address, is_gateway, eth_tx.id)
+                        .await
+                        .unwrap();
+                    self.history_scan_cursors.remove(&operator_type);
+                    self.non_final_scan_cursors.remove(&operator_type);
+                    self.inflight_scan_cursors.remove(&operator_type);
+                }
+                InflightTxsOutcome::MoreHistory => {
+                    return Ok(InflightTxsOutcome::MoreHistory);
+                }
+                InflightTxsOutcome::NoAction => {
+                    if non_final_page_is_full {
+                        self.non_final_scan_cursors
+                            .insert(operator_type, non_final_last_id.unwrap());
+                        return Ok(InflightTxsOutcome::MoreHistory);
+                    }
+                    self.non_final_scan_cursors.remove(&operator_type);
+                }
             }
 
             let inflight_labels = (TxScanQuery::Inflight, operator_type).into();
-            let expected_inflight_rows = storage
-                .eth_sender_dal()
-                .get_inflight_txs_count(operator_address, is_gateway)
-                .await
-                .unwrap();
-            METRICS.tx_scan_expected_rows[&inflight_labels]
-                .set(expected_inflight_rows);
+            let inflight_cursor = self.inflight_scan_cursors.get(&operator_type).copied();
+            if inflight_cursor.is_none() {
+                let count = storage
+                    .eth_sender_dal()
+                    .get_inflight_txs_count(operator_address, is_gateway)
+                    .await
+                    .unwrap();
+                METRICS.tx_scan_expected_rows[&inflight_labels].set(count);
+                METRICS.number_of_inflight_txs[&operator_type].set(count);
+            }
             tracing::info!(
                 ?operator_type,
                 query = "inflight",
-                expected_rows = expected_inflight_rows,
                 "Starting eth tx status scan"
             );
             let inflight_txs = storage
                 .eth_sender_dal()
-                .get_inflight_txs(operator_address, is_gateway)
+                .get_inflight_txs(
+                    operator_address,
+                    is_gateway,
+                    inflight_cursor,
+                    self.config.status_scan_batch_size.get(),
+                )
                 .await
                 .unwrap();
-            METRICS.number_of_inflight_txs[&operator_type].set(inflight_txs.len());
             observe_tx_scan(TxScanQuery::Inflight, operator_type, &inflight_txs);
             tracing::info!(
                 ?operator_type,
@@ -510,16 +642,33 @@ impl EthTxManager {
                 rows = inflight_txs.len(),
                 "Finished eth tx status scan"
             );
-            Ok(self
+            let inflight_page_is_full =
+                inflight_txs.len() == self.config.status_scan_batch_size.get() as usize;
+            let inflight_last_id = inflight_txs.last().map(|tx| tx.id);
+            let result = self
                 .apply_inflight_txs_statuses_and_get_first_to_resend(
                     storage,
                     l1_block_numbers,
                     operator_nonce,
                     inflight_txs,
+                    operator_type,
                 )
-                .await?)
+                .await?;
+            if matches!(result, InflightTxsOutcome::NoAction) && inflight_page_is_full {
+                self.inflight_scan_cursors
+                    .insert(operator_type, inflight_last_id.unwrap());
+                Ok(InflightTxsOutcome::MoreHistory)
+            } else {
+                if !matches!(result, InflightTxsOutcome::MoreHistory) {
+                    self.inflight_scan_cursors.remove(&operator_type);
+                }
+                Ok(result)
+            }
         } else {
-            Ok(None)
+            self.history_scan_cursors.remove(&operator_type);
+            self.non_final_scan_cursors.remove(&operator_type);
+            self.inflight_scan_cursors.remove(&operator_type);
+            Ok(InflightTxsOutcome::NoAction)
         }
     }
 
@@ -529,7 +678,8 @@ impl EthTxManager {
         l1_block_numbers: L1BlockNumbers,
         operator_nonce: OperatorNonce,
         inflight_txs: Vec<EthTx>,
-    ) -> Result<Option<(EthTx, u32)>, EthSenderError> {
+        operator_type: OperatorType,
+    ) -> Result<InflightTxsOutcome, EthSenderError> {
         tracing::trace!(
             "Going through not confirmed txs. \
              Block numbers: latest {}, fast_finality {}, finalized {}, \
@@ -571,10 +721,11 @@ impl EthTxManager {
                     .get_block_number_on_first_sent_attempt(tx.id)
                     .await
                     .unwrap();
-                return Ok(Some((
+                self.history_scan_cursors.remove(&operator_type);
+                return Ok(InflightTxsOutcome::Resend(
                     tx,
                     first_sent_at_block.unwrap_or(l1_block_numbers.latest.0),
-                )));
+                ));
             }
 
             // If on fast_finality block sender's nonce was > tx.nonce,
@@ -593,12 +744,18 @@ impl EthTxManager {
                 tx.nonce,
             );
 
-            match self.check_all_sending_attempts(storage, &tx).await {
-                Ok(Some(tx_status)) => {
+            match self
+                .check_all_sending_attempts(storage, &tx, operator_type)
+                .await
+            {
+                Ok(HistoryCheckOutcome::Found(tx_status)) => {
                     self.apply_tx_status(storage, &tx, tx_status, l1_block_numbers)
                         .await;
                 }
-                Ok(None) => {
+                Ok(HistoryCheckOutcome::MoreHistory) => {
+                    return Ok(InflightTxsOutcome::MoreHistory);
+                }
+                Ok(HistoryCheckOutcome::Exhausted) => {
                     // The nonce has increased but we did not find the receipt.
                     // This is an error because such a big re-org may cause transactions that were
                     // previously recorded as confirmed to become pending again and we have to
@@ -617,7 +774,7 @@ impl EthTxManager {
                 }
             }
         }
-        Ok(None)
+        Ok(InflightTxsOutcome::NoAction)
     }
 
     async fn apply_tx_status(
@@ -923,13 +1080,12 @@ impl EthTxManager {
         // Current inflight count
         let number_inflight_txs = storage
             .eth_sender_dal()
-            .get_inflight_txs(
+            .get_inflight_txs_count(
                 self.operator_address(operator_type),
                 operator_type == OperatorType::Gateway,
             )
             .await
-            .unwrap()
-            .len();
+            .unwrap();
         
         // Available slots by config
         let available_slots = self
@@ -1021,7 +1177,7 @@ impl EthTxManager {
             .await;
 
         match scan {
-            Ok(Some((tx, sent_at_block))) => {
+            Ok(InflightTxsOutcome::Resend(tx, sent_at_block)) => {
                 let time_in_mempool_in_l1_blocks: u32 = current.saturating_sub(sent_at_block);
                 self.send_eth_tx(
                     storage,
@@ -1035,7 +1191,11 @@ impl EthTxManager {
                 backoff_pow = 0;
                 next_scan_at_block = current.saturating_add(1);
             }
-            Ok(None) => {
+            Ok(InflightTxsOutcome::MoreHistory) => {
+                backoff_pow = 0;
+                next_scan_at_block = current;
+            }
+            Ok(InflightTxsOutcome::NoAction) => {
                 backoff_pow = backoff_pow.saturating_add(1u8).min(6);
                 let shift: u32 = u32::from(backoff_pow); // 0..=6
                 let stride: u32 = 1u32 << shift;
