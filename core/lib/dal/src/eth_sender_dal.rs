@@ -24,32 +24,86 @@ pub struct EthSenderDal<'a, 'c> {
     pub(crate) storage: &'a mut Connection<'c, Core>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EthTxHistoryHash {
+    pub id: u32,
+    pub tx_hash: H256,
+}
+
 impl EthSenderDal<'_, '_> {
-    pub async fn get_non_final_txs(
+    pub async fn get_non_final_txs_count(
         &mut self,
         operator_address: Address,
         is_gateway: bool,
-    ) -> sqlx::Result<Vec<EthTx>> {
-        let txs = sqlx::query_as!(
-            StorageEthTx,
+    ) -> sqlx::Result<usize> {
+        let count = sqlx::query_scalar::<_, i64>(
             r#"
-            SELECT
-                eth_txs.*
-            FROM
-                eth_txs
+            SELECT COUNT(*)
+            FROM eth_txs
             JOIN eth_txs_history ON eth_txs.confirmed_eth_tx_history_id = eth_txs_history.id
             WHERE
                 from_addr = $1
                 AND is_gateway = $2
                 AND eth_txs_history.finality_status != 'finalized'
-            ORDER BY
-                eth_txs.id
             "#,
-            operator_address.as_bytes(),
-            is_gateway,
         )
-        .fetch_all(self.storage.conn())
+        .bind(operator_address.as_bytes())
+        .bind(is_gateway)
+        .fetch_one(self.storage.conn())
         .await?;
+        Ok(count.try_into().unwrap())
+    }
+
+    pub async fn get_non_final_txs(
+        &mut self,
+        operator_address: Address,
+        is_gateway: bool,
+        after_id: Option<u32>,
+        limit: u64,
+    ) -> sqlx::Result<Vec<EthTx>> {
+        let txs = if let Some(after_id) = after_id {
+            sqlx::query_as::<_, StorageEthTx>(
+                r#"
+                SELECT eth_txs.*
+                FROM eth_txs
+                JOIN eth_txs_history
+                    ON eth_txs.confirmed_eth_tx_history_id = eth_txs_history.id
+                WHERE
+                    from_addr = $1
+                    AND is_gateway = $2
+                    AND eth_txs_history.finality_status != 'finalized'
+                    AND eth_txs.id > $3
+                ORDER BY eth_txs.id
+                LIMIT $4
+                "#,
+            )
+            .bind(operator_address.as_bytes())
+            .bind(is_gateway)
+            .bind(after_id as i32)
+            .bind(limit as i64)
+            .fetch_all(self.storage.conn())
+            .await?
+        } else {
+            sqlx::query_as::<_, StorageEthTx>(
+                r#"
+                SELECT eth_txs.*
+                FROM eth_txs
+                JOIN eth_txs_history
+                    ON eth_txs.confirmed_eth_tx_history_id = eth_txs_history.id
+                WHERE
+                    from_addr = $1
+                    AND is_gateway = $2
+                    AND eth_txs_history.finality_status != 'finalized'
+                ORDER BY eth_txs.id
+                LIMIT $3
+                "#,
+            )
+            .bind(operator_address.as_bytes())
+            .bind(is_gateway)
+            .bind(limit as i64)
+            .fetch_all(self.storage.conn())
+            .await?
+        };
         Ok(txs.into_iter().map(|tx| tx.into()).collect())
     }
 
@@ -105,41 +159,104 @@ impl EthSenderDal<'_, '_> {
         &mut self,
         operator_address: Address,
         is_gateway: bool,
+        after_id: Option<u32>,
+        limit: u64,
     ) -> sqlx::Result<Vec<EthTx>> {
-        let txs = sqlx::query_as!(
-            StorageEthTx,
+        let txs = if let Some(after_id) = after_id {
+            sqlx::query_as::<_, StorageEthTx>(
+                r#"
+                SELECT *
+                FROM eth_txs
+                WHERE
+                    from_addr = $1
+                    AND is_gateway = $2
+                    AND confirmed_eth_tx_history_id IS NULL
+                    AND id > $3
+                    AND id <= COALESCE(
+                        (SELECT eth_tx_id
+                        FROM eth_txs_history
+                        JOIN eth_txs ON eth_txs.id = eth_txs_history.eth_tx_id
+                        WHERE
+                            eth_txs_history.finality_status != 'finalized'
+                            AND from_addr = $1
+                            AND is_gateway = $2
+                        ORDER BY eth_tx_id DESC LIMIT 1),
+                        0
+                    )
+                ORDER BY id
+                LIMIT $4
+                "#,
+            )
+            .bind(operator_address.as_bytes())
+            .bind(is_gateway)
+            .bind(after_id as i32)
+            .bind(limit as i64)
+            .fetch_all(self.storage.conn())
+            .await?
+        } else {
+            sqlx::query_as::<_, StorageEthTx>(
+                r#"
+                SELECT *
+                FROM eth_txs
+                WHERE
+                    from_addr = $1
+                    AND is_gateway = $2
+                    AND confirmed_eth_tx_history_id IS NULL
+                    AND id <= COALESCE(
+                        (SELECT eth_tx_id
+                        FROM eth_txs_history
+                        JOIN eth_txs ON eth_txs.id = eth_txs_history.eth_tx_id
+                        WHERE
+                            eth_txs_history.finality_status != 'finalized'
+                            AND from_addr = $1
+                            AND is_gateway = $2
+                        ORDER BY eth_tx_id DESC LIMIT 1),
+                        0
+                    )
+                ORDER BY id
+                LIMIT $3
+                "#,
+            )
+            .bind(operator_address.as_bytes())
+            .bind(is_gateway)
+            .bind(limit as i64)
+            .fetch_all(self.storage.conn())
+            .await?
+        };
+        Ok(txs.into_iter().map(|tx| tx.into()).collect())
+    }
+
+    pub async fn get_inflight_txs_count(
+        &mut self,
+        operator_address: Address,
+        is_gateway: bool,
+    ) -> sqlx::Result<usize> {
+        let count = sqlx::query_scalar::<_, i64>(
             r#"
-            SELECT
-                *
-            FROM
-                eth_txs
+            SELECT COUNT(*)
+            FROM eth_txs
             WHERE
                 from_addr = $1
                 AND is_gateway = $2
                 AND confirmed_eth_tx_history_id IS NULL
                 AND id <= COALESCE(
-                    (SELECT
-                        eth_tx_id
-                    FROM
-                        eth_txs_history
+                    (SELECT eth_tx_id
+                    FROM eth_txs_history
                     JOIN eth_txs ON eth_txs.id = eth_txs_history.eth_tx_id
                     WHERE
                         eth_txs_history.finality_status != 'finalized'
-                        AND
-                        from_addr = $1
+                        AND from_addr = $1
                         AND is_gateway = $2
                     ORDER BY eth_tx_id DESC LIMIT 1),
                     0
                 )
-            ORDER BY
-                id
             "#,
-            operator_address.as_bytes(),
-            is_gateway,
         )
-        .fetch_all(self.storage.conn())
+        .bind(operator_address.as_bytes())
+        .bind(is_gateway)
+        .fetch_one(self.storage.conn())
         .await?;
-        Ok(txs.into_iter().map(|tx| tx.into()).collect())
+        Ok(count.try_into().unwrap())
     }
 
     pub async fn get_inflight_txs_count_for_gateway_migration(
@@ -888,12 +1005,9 @@ impl EthSenderDal<'_, '_> {
         chain_id: Option<SLChainId>,
     ) -> DalResult<Vec<TxHistory>> {
         let limit = i64::try_from(limit.get()).expect("limit overflow");
-        let tx_history = match_query_as!(
-            StorageTxHistory,
-            [r#"
+        let mut query = String::from(r#"
             SELECT
                 eth_txs_history.*,
-                eth_txs.blob_sidecar,
                 eth_txs.tx_type,
                 eth_txs.chain_id
             FROM
@@ -901,18 +1015,23 @@ impl EthSenderDal<'_, '_> {
             LEFT JOIN eth_txs ON eth_tx_id = eth_txs.id
             WHERE
                 eth_txs_history.finality_status != 'finalized'
-            "#, _,
-            r#"
+            "#);
+        if chain_id.is_some() {
+            query.push_str(" AND eth_txs.chain_id = $2");
+        }
+        query.push_str(r#"
             ORDER BY
                 eth_txs_history.id ASC
             LIMIT
                 $1
-            "#],
-            match (chain_id) {
-                Some(chain_id) => ("AND eth_txs.chain_id = $2"; limit, chain_id.0 as i64),
-                None => (""; limit),
-            }
-        )
+            "#);
+        let query = sqlx::query_as::<_, StorageTxHistory>(&query).bind(limit);
+        let query = if let Some(chain_id) = chain_id {
+            query.bind(chain_id.0 as i64)
+        } else {
+            query
+        };
+        let tx_history = query
         .instrument("get_unfinalized_transactions")
         .with_arg("chain_id", &chain_id)
         .fetch_all(self.storage)
@@ -966,12 +1085,10 @@ impl EthSenderDal<'_, '_> {
         &mut self,
         eth_tx_history_id: u32,
     ) -> DalResult<TxHistory> {
-        let tx_history = sqlx::query_as!(
-            StorageTxHistory,
+        let tx_history = sqlx::query_as::<_, StorageTxHistory>(
             r#"
             SELECT
                 eth_txs_history.*,
-                eth_txs.blob_sidecar,
                 eth_txs.tx_type,
                 eth_txs.chain_id
             FROM
@@ -980,8 +1097,8 @@ impl EthSenderDal<'_, '_> {
             WHERE
                 eth_txs_history.id = $1
             "#,
-            eth_tx_history_id as i32,
         )
+        .bind(eth_tx_history_id as i32)
         .instrument("get_eth_tx_history_by_id")
         .with_arg("eth_tx_history_id", &eth_tx_history_id)
         .fetch_one(self.storage)
@@ -993,12 +1110,10 @@ impl EthSenderDal<'_, '_> {
         &mut self,
         eth_tx_id: u32,
     ) -> sqlx::Result<Vec<TxHistory>> {
-        let tx_history = sqlx::query_as!(
-            StorageTxHistory,
+        let tx_history = sqlx::query_as::<_, StorageTxHistory>(
             r#"
             SELECT
                 eth_txs_history.*,
-                eth_txs.blob_sidecar,
                 eth_txs.tx_type,
                 eth_txs.chain_id
             FROM
@@ -1009,11 +1124,75 @@ impl EthSenderDal<'_, '_> {
             ORDER BY
                 eth_txs_history.created_at DESC
             "#,
-            eth_tx_id as i32
         )
+        .bind(eth_tx_id as i32)
         .fetch_all(self.storage.conn())
         .await?;
         Ok(tx_history.into_iter().map(|tx| tx.into()).collect())
+    }
+
+    pub async fn get_tx_history_hashes_to_check(
+        &mut self,
+        eth_tx_id: u32,
+        before_id: Option<u32>,
+        limit: u64,
+    ) -> sqlx::Result<Vec<EthTxHistoryHash>> {
+        let rows = if let Some(before_id) = before_id {
+            sqlx::query(
+                r#"
+                SELECT id, tx_hash
+                FROM eth_txs_history
+                WHERE eth_tx_id = $1 AND id < $2
+                ORDER BY id DESC
+                LIMIT $3
+                "#,
+            )
+            .bind(eth_tx_id as i32)
+            .bind(before_id as i32)
+            .bind(limit as i64)
+            .fetch_all(self.storage.conn())
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT id, tx_hash
+                FROM eth_txs_history
+                WHERE eth_tx_id = $1
+                ORDER BY id DESC
+                LIMIT $2
+                "#,
+            )
+            .bind(eth_tx_id as i32)
+            .bind(limit as i64)
+            .fetch_all(self.storage.conn())
+            .await?
+        };
+
+        use sqlx::Row as _;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let id: i32 = row.get("id");
+                let tx_hash: String = row.get("tx_hash");
+                EthTxHistoryHash {
+                    id: id as u32,
+                    tx_hash: H256::from_str(&tx_hash).expect("Incorrect hash"),
+                }
+            })
+            .collect())
+    }
+
+    pub async fn get_tx_history_to_check_count(
+        &mut self,
+        eth_tx_id: u32,
+    ) -> sqlx::Result<usize> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM eth_txs_history WHERE eth_tx_id = $1",
+        )
+        .bind(eth_tx_id as i32)
+        .fetch_one(self.storage.conn())
+        .await?;
+        Ok(count.try_into().unwrap())
     }
 
     pub async fn get_block_number_on_first_sent_attempt(
@@ -1046,12 +1225,10 @@ impl EthSenderDal<'_, '_> {
         &mut self,
         eth_tx_id: u32,
     ) -> sqlx::Result<Option<TxHistory>> {
-        let history_item = sqlx::query_as!(
-            StorageTxHistory,
+        let history_item = sqlx::query_as::<_, StorageTxHistory>(
             r#"
             SELECT
                 eth_txs_history.*,
-                eth_txs.blob_sidecar,
                 eth_txs.tx_type,
                 eth_txs.chain_id
             FROM
@@ -1064,8 +1241,8 @@ impl EthSenderDal<'_, '_> {
             LIMIT
                 1
             "#,
-            eth_tx_id as i32
         )
+        .bind(eth_tx_id as i32)
         .fetch_optional(self.storage.conn())
         .await?;
         Ok(history_item.map(|tx| tx.into()))

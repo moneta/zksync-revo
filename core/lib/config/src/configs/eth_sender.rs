@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{num::NonZeroU64, time::Duration};
 
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,7 @@ impl EthConfig {
                 tx_poll_period: Duration::from_secs(1),
                 aggregate_tx_poll_period: Duration::from_secs(1),
                 max_txs_in_flight: 30,
+                status_scan_batch_size: NonZeroU64::new(100).unwrap(),
                 proof_sending_mode: ProofSendingMode::SkipEveryProof,
                 max_aggregated_tx_gas: 4000000,
                 max_aggregated_blocks_to_commit: 10,
@@ -130,6 +131,9 @@ pub struct SenderConfig {
     /// The maximum number of unconfirmed Ethereum transactions.
     #[config(default_t = 30)]
     pub max_txs_in_flight: u64,
+    /// Maximum rows fetched by an Ethereum transaction status scan query.
+    #[config(default_t = NonZeroU64::new(100).unwrap())]
+    pub status_scan_batch_size: NonZeroU64,
     /// The mode in which proofs are sent.
     pub proof_sending_mode: ProofSendingMode,
     #[config(default_t = 4_000_000)]
@@ -292,6 +296,7 @@ mod tests {
                 tx_poll_period: Duration::from_secs(3),
                 aggregate_tx_poll_period: Duration::from_secs(3),
                 max_txs_in_flight: 3,
+                status_scan_batch_size: NonZeroU64::new(100).unwrap(),
                 proof_sending_mode: ProofSendingMode::SkipEveryProof,
                 max_acceptable_priority_fee_in_gwei: 100_000_000_000,
                 pubdata_sending_mode: PubdataSendingMode::Calldata,
@@ -342,6 +347,7 @@ mod tests {
             ETH_SENDER_SENDER_TX_POLL_PERIOD="3"
             ETH_SENDER_SENDER_AGGREGATE_TX_POLL_PERIOD="3"
             ETH_SENDER_SENDER_MAX_TXS_IN_FLIGHT="3"
+            ETH_SENDER_SENDER_STATUS_SCAN_BATCH_SIZE="100"
             ETH_SENDER_SENDER_OPERATOR_PRIVATE_KEY="0x27593fea79697e947890ecbecce7901b0008345e5d7259710d0dd5e500d040be"
             ETH_SENDER_SENDER_PROOF_SENDING_MODE="SkipEveryProof"
             ETH_SENDER_GAS_ADJUSTER_DEFAULT_PRIORITY_FEE_PER_GAS="20000000000"
@@ -395,6 +401,7 @@ mod tests {
             tx_poll_period: 3
             aggregate_tx_poll_period: 3
             max_txs_in_flight: 3
+            status_scan_batch_size: 100
             proof_sending_mode: SKIP_EVERY_PROOF
             max_aggregated_tx_gas: 4000000
             max_eth_tx_data_size: 120000
@@ -454,6 +461,7 @@ mod tests {
             tx_poll_period: 3 seconds
             aggregate_tx_poll_period: 3s
             max_txs_in_flight: 3
+            status_scan_batch_size: 100
             proof_sending_mode: SKIP_EVERY_PROOF
             max_aggregated_tx_gas: 4000000
             max_eth_tx_data_size: 120000
