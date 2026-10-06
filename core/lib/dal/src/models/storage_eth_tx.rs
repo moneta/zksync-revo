@@ -7,7 +7,7 @@ use zksync_types::{
     Address, L1BatchNumber, L2BlockNumber, Nonce, SLChainId, H256,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct StorageEthTx {
     pub id: i32,
     pub nonce: i64,
@@ -41,7 +41,7 @@ pub struct BlocksEthSenderStats {
     pub mined: Vec<(AggregatedActionType, u32)>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, sqlx::FromRow)]
 pub struct StorageTxHistory {
     pub id: i32,
     pub eth_tx_id: i32,
@@ -56,10 +56,6 @@ pub struct StorageTxHistory {
     pub updated_at: NaiveDateTime,
     pub signed_raw_tx: Option<Vec<u8>>,
     pub sent_at_block: Option<i32>,
-    // A `EIP_4844_TX_TYPE` transaction blob sidecar.
-    //
-    // Format a `bincode`-encoded `EthTxBlobSidecar` enum.
-    pub blob_sidecar: Option<Vec<u8>>,
     pub blob_base_fee_per_gas: Option<i64>,
 
     // EIP712 txs
