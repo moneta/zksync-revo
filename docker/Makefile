@@ -88,7 +88,7 @@ build-contract-verifier: check-tools prepare-contracts prepare-keys
 # 		--tag server-v2:$(PROTOCOL_VERSION) $(CONTEXT)
 build-server-v2: check-tools prepare-contracts prepare-keys
 	$(DOCKER_BUILD_CMD) --push --file server-v2/Dockerfile --load \
-		--tag ndau/server-v2:beta-0.29.2 $(CONTEXT)
+		--tag ndau/server-v2:beta-0.29.2.hotfix $(CONTEXT)
 
 # build-circuit-prover-gpu: check-tools prepare-keys
 # 	$(DOCKER_BUILD_CMD) --file circuit-prover-gpu/Dockerfile --load \

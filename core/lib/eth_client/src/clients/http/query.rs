@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::OnceLock};
 
 use async_trait::async_trait;
 use jsonrpsee::core::ClientError;
@@ -16,6 +16,17 @@ use crate::{
 };
 
 const FEE_HISTORY_MAX_REQUEST_CHUNK: usize = 1023;
+
+/// Set `ETH_CLIENT_LEGACY_FEE_HISTORY=true` to omit `rewardPercentiles` (Geth < v1.17.7 style).
+fn fee_history_reward_percentiles() -> Option<Vec<f32>> {
+    static LEGACY: OnceLock<bool> = OnceLock::new();
+    let legacy = *LEGACY.get_or_init(|| {
+        std::env::var("ETH_CLIENT_LEGACY_FEE_HISTORY")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    });
+    (!legacy).then(Vec::new)
+}
 
 #[async_trait]
 impl<T> EthInterface for T
@@ -317,7 +328,7 @@ where
             .fee_history(
                 U64::from(chunk_size),
                 web3::BlockNumber::from(chunk_end),
-                None,
+                fee_history_reward_percentiles(),
             )
             .rpc_context("fee_history")
             .with_arg("chunk_size", &chunk_size)
@@ -425,7 +436,11 @@ where
         let chunk_size = chunk_end - chunk_start + 1;
 
         let fee_history = client
-            .fee_history(U64::from(chunk_size).into(), chunk_end.into(), None)
+            .fee_history(
+                U64::from(chunk_size).into(),
+                chunk_end.into(),
+                fee_history_reward_percentiles(),
+            )
             .rpc_context("fee_history")
             .with_arg("chunk_size", &chunk_size)
             .with_arg("block", &chunk_end)
